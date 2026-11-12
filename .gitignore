@@ -1,0 +1,10 @@
+.gradle/
+build/
+app/build/
+app/src/main/jniLibs/
+app/src/main/res/mipmap-*/
+rust/target/
+*.keystore
+*.jks
+local.properties
+.idea/

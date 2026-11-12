@@ -1,0 +1,108 @@
+name: Build & Release AltHub APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate DPI Icons from icon.png
+        run: |
+          if [ ! -f icon.png ]; then
+            echo "icon.png not found at repository root"
+            exit 1
+          fi
+          CONVERT=""
+          if command -v magick &>/dev/null; then CONVERT="magick"
+          elif command -v convert &>/dev/null; then CONVERT="convert"
+          fi
+          for entry in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            density="${entry%%:*}"
+            px="${entry##*:}"
+            mkdir -p "app/src/main/res/mipmap-$density"
+            if [ -n "$CONVERT" ]; then
+              $CONVERT icon.png -resize "${px}x${px}" "app/src/main/res/mipmap-$density/ic_launcher.png"
+              $CONVERT icon.png -resize "${px}x${px}" "app/src/main/res/mipmap-$density/ic_launcher_round.png"
+            else
+              python3 -c "from PIL import Image; img = Image.open('icon.png').resize(($px, $px)); img.save('app/src/main/res/mipmap-$density/ic_launcher.png'); img.save('app/src/main/res/mipmap-$density/ic_launcher_round.png')"
+            fi
+          done
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          SDKMANAGER=$(find "$SDK_ROOT" -path "*/cmdline-tools/*/bin/sdkmanager" 2>/dev/null | head -1)
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Generate Keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore ci.keystore \
+            -alias althub-ci \
+            -keyalg RSA -keysize 2048 -validity 36500 \
+            -storepass althub123 \
+            -keypass althub123 \
+            -dname "CN=AltHub CI, OU=Dev, O=AltHub, L=Jakarta, C=ID"
+          echo "KEYSTORE_FILE=${{ github.workspace }}/ci.keystore" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=althub123" >> $GITHUB_ENV
+          echo "KEY_ALIAS=althub-ci" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=althub123" >> $GITHUB_ENV
+
+      - name: Build APK
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Sign APK
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          BUILD_TOOLS=$(ls -d "$SDK_ROOT"/build-tools/* | sort -V | tail -1)
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass pass:"$KEYSTORE_PASSWORD" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --out AltHub_v1.0.${{ github.run_number }}.apk "$APK_PATH"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "AltHub v1.0.${{ github.run_number }}"
+          body: |
+            AltHub Build #${{ github.run_number }} (arm64-v8a & armeabi-v7a)
+            Commit: ${{ github.event.head_commit.message }}
+          files: AltHub_v1.0.${{ github.run_number }}.apk
