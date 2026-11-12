@@ -20,7 +20,7 @@ object AutoDiscoveryRepository {
     const val MAIN_CDN_URL = "https://github.com/alteriza/althub/cdn.txt"
     const val MAIN_POST_URL = "https://github.com/alteriza/althub/post/"
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AltHub/1.0"
-    private const val MAX_THUMB_DIM = 480
+    private const val MAX_THUMB_DIM = 720
 
     private data class GitHubLocation(
         val owner: String,
@@ -449,8 +449,8 @@ object AutoDiscoveryRepository {
                 saveBitmapCache(bmp, cacheFile)
                 bmp
             } else {
-                val decodedFile = prepareMediaForPlayback(context, item) ?: return@withContext null
-                val frame = extractVideoFrame(decodedFile.absolutePath) ?: return@withContext null
+                val prepared = prepareVideoForPlayback(context, item) ?: return@withContext null
+                val frame = extractVideoFrame(prepared.file.absolutePath) ?: return@withContext null
                 val scaled = scaleDown(frame)
                 saveBitmapCache(scaled, cacheFile)
                 scaled
@@ -464,27 +464,42 @@ object AutoDiscoveryRepository {
             BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
         }
 
-    suspend fun prepareMediaForPlayback(context: Context, item: RemoteMediaItem): File? =
+    suspend fun prepareVideoForPlayback(context: Context, item: RemoteMediaItem): PreparedVideo? =
         withContext(Dispatchers.IO) {
             val containerFile = ensureContainerCached(context, item) ?: return@withContext null
             val decodedDir = File(context.cacheDir, "althub_decoded").apply { mkdirs() }
             val headerJson = NativeCore.readHeader(containerFile.absolutePath)
             val ext = runCatching {
                 JSONObject(headerJson ?: "{}").optString("original_ext", "")
-            }.getOrDefault("").ifBlank {
-                if (item.kind == MediaKind.VIDEO) "mp4" else "png"
-            }
+            }.getOrDefault("").ifBlank { "mp4" }
             val outFile = File(decodedDir, "${sha256(item.id)}.$ext")
-            if (outFile.exists() && outFile.length() > 0L) {
-                return@withContext outFile
+            if (!outFile.exists() || outFile.length() == 0L) {
+                val rc = NativeCore.decodeToFile(containerFile.absolutePath, outFile.absolutePath)
+                if (rc != 0 || !outFile.exists() || outFile.length() == 0L) {
+                    outFile.delete()
+                    return@withContext null
+                }
             }
-            val rc = NativeCore.decodeToFile(containerFile.absolutePath, outFile.absolutePath)
-            if (rc != 0 || !outFile.exists() || outFile.length() == 0L) {
-                outFile.delete()
-                return@withContext null
-            }
-            outFile
+            val dims = probeVideoDimensions(outFile.absolutePath)
+            PreparedVideo(file = outFile, width = dims.first, height = dims.second)
         }
+
+    private fun probeVideoDimensions(path: String): Pair<Int, Int> {
+        return try {
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(path)
+                val rawW = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 16
+                val rawH = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 9
+                val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                if (rot == 90 || rot == 270) rawH to rawW else rawW to rawH
+            } finally {
+                runCatching { mmr.release() }
+            }
+        } catch (_: Throwable) {
+            16 to 9
+        }
+    }
 
     private fun ensureContainerCached(context: Context, item: RemoteMediaItem): File? {
         val rawDir = File(context.cacheDir, "althub_containers").apply { mkdirs() }
