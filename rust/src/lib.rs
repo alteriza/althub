@@ -12,10 +12,43 @@ const MAGIC_VIDEO: &[u8; 4] = b"SVCV";
 const MAGIC_IMAGE: &[u8; 4] = b"SICV";
 const BUF_CAP: usize = 262_144;
 
+fn xor_decode(encoded: &[u8], key: u8) -> String {
+    let mut out = Vec::with_capacity(encoded.len());
+    for (i, &b) in encoded.iter().enumerate() {
+        out.push(b ^ key ^ ((i as u8).wrapping_mul(31)));
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+macro_rules! obf_str {
+    ($s:expr, $k:expr) => {{
+        const RAW: &[u8] = $s.as_bytes();
+        const LEN: usize = RAW.len();
+        const ENC: [u8; LEN] = {
+            let mut arr = [0u8; LEN];
+            let mut i = 0;
+            while i < LEN {
+                arr[i] = RAW[i] ^ $k ^ ((i as u8).wrapping_mul(31));
+                i += 1;
+            }
+            arr
+        };
+        xor_decode(&ENC, $k)
+    }};
+}
+
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct Header {
     format: String,
+    compression: u8,
+    original_ext: String,
+    original_size: u64,
+}
+
+#[derive(Serialize)]
+struct ParsedHeaderResponse {
+    header_offset: u64,
     compression: u8,
     original_ext: String,
     original_size: u64,
@@ -158,6 +191,187 @@ fn encode_from_file(
         return -16;
     }
     0
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getPrimaryCdnUrl(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let url = obf_str!("https://github.com/alteriza/althub/cdn.txt", 0x5A);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getHiddenCdnUrl(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let url = obf_str!("https://github.com/alteriza/althub/blob/main/hcdn.txt", 0x73);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getPrimaryPostUrl(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let url = obf_str!("https://github.com/alteriza/althub/post/", 0x3D);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getDefaultRepoUrl(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let url = obf_str!("https://github.com/alteriza/althub", 0x61);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getUserAgent(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let ua = obf_str!("Mozilla/5.0 (Linux; Android 14) AltHub/1.0", 0x4C);
+    env.new_string(ua).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildGitHubRepoApi(
+    mut env: JNIEnv,
+    _this: JObject,
+    owner: JString,
+    repo: JString,
+) -> jstring {
+    let o: String = env.get_string(&owner).map(Into::into).unwrap_or_default();
+    let r: String = env.get_string(&repo).map(Into::into).unwrap_or_default();
+    let base = obf_str!("https://api.github.com/repos/", 0x29);
+    let url = format!("{}{}/{}", base, o, r);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildGitHubTreeApi(
+    mut env: JNIEnv,
+    _this: JObject,
+    owner: JString,
+    repo: JString,
+    branch: JString,
+) -> jstring {
+    let o: String = env.get_string(&owner).map(Into::into).unwrap_or_default();
+    let r: String = env.get_string(&repo).map(Into::into).unwrap_or_default();
+    let b: String = env.get_string(&branch).map(Into::into).unwrap_or_default();
+    let base = obf_str!("https://api.github.com/repos/", 0x37);
+    let mid = obf_str!("/git/trees/", 0x41);
+    let tail = obf_str!("?recursive=1", 0x55);
+    let url = format!("{}{}/{}{}{}{}", base, o, r, mid, b, tail);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildGitHubContentsApi(
+    mut env: JNIEnv,
+    _this: JObject,
+    owner: JString,
+    repo: JString,
+    path: JString,
+    branch: JString,
+) -> jstring {
+    let o: String = env.get_string(&owner).map(Into::into).unwrap_or_default();
+    let r: String = env.get_string(&repo).map(Into::into).unwrap_or_default();
+    let p: String = env.get_string(&path).map(Into::into).unwrap_or_default();
+    let b: String = env.get_string(&branch).map(Into::into).unwrap_or_default();
+    let base = obf_str!("https://api.github.com/repos/", 0x1F);
+    let mid = obf_str!("/contents/", 0x6E);
+    let tail = obf_str!("?ref=", 0x7A);
+    let url = format!("{}{}/{}{}{}{}{}", base, o, r, mid, p, tail, b);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildRawGitHubUrl(
+    mut env: JNIEnv,
+    _this: JObject,
+    owner: JString,
+    repo: JString,
+    branch: JString,
+    encoded_path: JString,
+) -> jstring {
+    let o: String = env.get_string(&owner).map(Into::into).unwrap_or_default();
+    let r: String = env.get_string(&repo).map(Into::into).unwrap_or_default();
+    let b: String = env.get_string(&branch).map(Into::into).unwrap_or_default();
+    let p: String = env.get_string(&encoded_path).map(Into::into).unwrap_or_default();
+    let base = obf_str!("https://raw.githubusercontent.com/", 0x52);
+    let url = format!("{}{}/{}/{}/{}", base, o, r, b, p);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildDriveEmbedUrl(
+    mut env: JNIEnv,
+    _this: JObject,
+    folder_id: JString,
+) -> jstring {
+    let fid: String = env.get_string(&folder_id).map(Into::into).unwrap_or_default();
+    let prefix = obf_str!("https://drive.google.com/embeddedfolderview?id=", 0x67);
+    let suffix = obf_str!("#list", 0x2B);
+    let url = format!("{}{}{}", prefix, fid, suffix);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildDriveDownloadUrl(
+    mut env: JNIEnv,
+    _this: JObject,
+    file_id: JString,
+) -> jstring {
+    let fid: String = env.get_string(&file_id).map(Into::into).unwrap_or_default();
+    let prefix = obf_str!("https://drive.usercontent.google.com/download?id=", 0x4E);
+    let suffix = obf_str!("&export=download&confirm=t", 0x33);
+    let url = format!("{}{}{}", prefix, fid, suffix);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_parseContainerHeaderBytes(
+    mut env: JNIEnv,
+    _this: JObject,
+    input: JByteArray,
+    input_len: jint,
+) -> jstring {
+    if input_len < 8 {
+        return std::ptr::null_mut();
+    }
+    let bytes = match env.convert_byte_array(input) {
+        Ok(b) => b,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let valid_len = (input_len as usize).min(bytes.len());
+    if valid_len < 8 {
+        return std::ptr::null_mut();
+    }
+    let slice = &bytes[..valid_len];
+    if &slice[0..4] != MAGIC_VIDEO && &slice[0..4] != MAGIC_IMAGE {
+        return std::ptr::null_mut();
+    }
+    let header_len = u32::from_le_bytes([slice[4], slice[5], slice[6], slice[7]]) as usize;
+    if header_len == 0 || header_len > 1024 * 1024 || valid_len < 8 + header_len {
+        return std::ptr::null_mut();
+    }
+    let header: Header = match serde_json::from_slice(&slice[8..8 + header_len]) {
+        Ok(h) => h,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let resp = ParsedHeaderResponse {
+        header_offset: (8 + header_len) as u64,
+        compression: header.compression,
+        original_ext: header.original_ext,
+        original_size: header.original_size,
+    };
+    let json = serde_json::to_string(&resp).unwrap_or_default();
+    env.new_string(json).unwrap_or_default().into_raw()
 }
 
 #[no_mangle]

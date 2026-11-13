@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -35,6 +36,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -44,7 +46,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Campaign
@@ -52,25 +56,30 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.NorthEast
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -98,6 +107,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.althub.alteriza.ui.theme.BbBackground
 import com.althub.alteriza.ui.theme.BbBlack
 import com.althub.alteriza.ui.theme.BbBorder
@@ -110,11 +122,20 @@ import com.althub.alteriza.ui.theme.BbWhite
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+// <RNX_ALERT_TAG>
+private const val RNX_ALERT_TITLE = "RNX // HIDDEN SECTION"
+private const val RNX_ALERT_MESSAGE = "/* [ISI_PESAN_ALERT_RNX_DISINI] */"
+// </RNX_ALERT_TAG>
+
+private const val PREFS_NAME = "althub_prefs"
+private const val KEY_WELCOME_SHOWN = "welcome_popup_shown"
+
 private enum class NavDestination(val label: String, val icon: ImageVector) {
     FEED("FEED", Icons.Default.Home),
     VIDEOS("VIDEOS", Icons.Default.Movie),
     PHOTOS("PHOTOS", Icons.Default.Image),
-    INFO("INFO", Icons.Default.Campaign)
+    INFO("INFO", Icons.Default.Campaign),
+    RNX("RNX", Icons.Default.Lock)
 }
 
 private enum class FeedChip(val label: String) {
@@ -122,6 +143,12 @@ private enum class FeedChip(val label: String) {
     VIDEOS("VIDEOS"),
     PHOTOS("PHOTOS"),
     INFO("INFO")
+}
+
+private enum class RnxChip(val label: String) {
+    ALL("ALL"),
+    VIDEOS("VIDEOS"),
+    PHOTOS("PHOTOS")
 }
 
 private sealed class TimelineEntry {
@@ -143,18 +170,41 @@ private fun applyImmersiveSystemBars(activity: Activity?) {
         WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AltHubApp() {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+    val prefs = remember(context) { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
     var currentTab by remember { mutableStateOf(NavDestination.FEED) }
     var activeFeedChip by remember { mutableStateOf(FeedChip.ALL) }
+    var activeRnxChip by remember { mutableStateOf(RnxChip.ALL) }
     var searchExpanded by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var loading by remember { mutableStateOf(true) }
+    var initialLoading by remember { mutableStateOf(true) }
+    var isRefreshing by remember { mutableStateOf(false) }
+
+    var rnxUnlocked by remember { mutableStateOf(false) }
+    var showRnxAlert by remember { mutableStateOf(false) }
+    var logoTapCount by remember { mutableIntStateOf(0) }
+    var lastLogoTapMs by remember { mutableLongStateOf(0L) }
+
+    var welcomePopupPost by remember { mutableStateOf<InfoPost?>(null) }
+
     var discovery by remember {
+        mutableStateOf(
+            DiscoveryResult(
+                mediaItems = emptyList(),
+                infoPosts = emptyList(),
+                activeSources = emptyList()
+            )
+        )
+    }
+
+    var rnxDiscovery by remember {
         mutableStateOf(
             DiscoveryResult(
                 mediaItems = emptyList(),
@@ -185,15 +235,55 @@ fun AltHubApp() {
         applyImmersiveSystemBars(activity)
     }
 
-    suspend fun syncRepository() {
-        loading = true
-        discovery = AutoDiscoveryRepository.discoverAll()
-        loading = false
+    suspend fun syncRepository(fromPullRefresh: Boolean = false) {
+        if (fromPullRefresh) {
+            isRefreshing = true
+        } else {
+            initialLoading = true
+        }
+        val mainResult = AutoDiscoveryRepository.discoverAll()
+        discovery = mainResult
+
+        if (!prefs.getBoolean(KEY_WELCOME_SHOWN, false)) {
+            val welcome = mainResult.infoPosts.firstOrNull {
+                it.fileName.equals("welcome.bbcode", ignoreCase = true) ||
+                    it.fileName.startsWith("welcome.", ignoreCase = true)
+            }
+            if (welcome != null) {
+                prefs.edit().putBoolean(KEY_WELCOME_SHOWN, true).apply()
+                welcomePopupPost = welcome
+            }
+        }
+
+        if (rnxUnlocked) {
+            rnxDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+        }
+
+        initialLoading = false
+        isRefreshing = false
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                rnxUnlocked = false
+                showRnxAlert = false
+                logoTapCount = 0
+                rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                if (currentTab == NavDestination.RNX) {
+                    currentTab = NavDestination.FEED
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     LaunchedEffect(Unit) {
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        syncRepository()
+        syncRepository(fromPullRefresh = false)
     }
 
     val allVideos = remember(discovery.mediaItems, searchQuery) {
@@ -221,6 +311,20 @@ fun AltHubApp() {
             searchQuery.isBlank() ||
                 post.title.contains(searchQuery, true) ||
                 post.bbcodeContent.contains(searchQuery, true)
+        }
+    }
+
+    val rnxFilteredMedia = remember(rnxDiscovery.mediaItems, activeRnxChip, searchQuery) {
+        rnxDiscovery.mediaItems.filter { item ->
+            val matchChip = when (activeRnxChip) {
+                RnxChip.ALL -> true
+                RnxChip.VIDEOS -> item.kind == MediaKind.VIDEO
+                RnxChip.PHOTOS -> item.kind == MediaKind.IMAGE
+            }
+            val matchQuery = searchQuery.isBlank() ||
+                item.title.contains(searchQuery, true) ||
+                item.fileName.contains(searchQuery, true)
+            matchChip && matchQuery
         }
     }
 
@@ -276,15 +380,39 @@ fun AltHubApp() {
                 .windowInsetsPadding(WindowInsets.safeDrawing)
         ) {
             SocialTopBar(
+                rnxUnlocked = rnxUnlocked,
                 searchExpanded = searchExpanded,
                 searchQuery = searchQuery,
-                isSyncing = loading,
+                onLogoTap = {
+                    val now = SystemClock.elapsedRealtime()
+                    logoTapCount = if (now - lastLogoTapMs <= 2500L) logoTapCount + 1 else 1
+                    lastLogoTapMs = now
+                    if (logoTapCount >= 5) {
+                        logoTapCount = 0
+                        if (!rnxUnlocked) {
+                            rnxUnlocked = true
+                            showRnxAlert = true
+                            currentTab = NavDestination.RNX
+                            scope.launch {
+                                isRefreshing = true
+                                rnxDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+                                isRefreshing = false
+                            }
+                        } else {
+                            rnxUnlocked = false
+                            showRnxAlert = false
+                            rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                            if (currentTab == NavDestination.RNX) {
+                                currentTab = NavDestination.FEED
+                            }
+                        }
+                    }
+                },
                 onToggleSearch = {
                     searchExpanded = !searchExpanded
                     if (!searchExpanded) searchQuery = ""
                 },
-                onSearchChange = { searchQuery = it },
-                onSync = { scope.launch { syncRepository() } }
+                onSearchChange = { searchQuery = it }
             )
 
             Box(
@@ -294,9 +422,29 @@ fun AltHubApp() {
                     .background(BbBorder)
             )
 
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            val pullRefreshState = rememberPullToRefreshState()
+
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh = {
+                    scope.launch { syncRepository(fromPullRefresh = true) }
+                },
+                state = pullRefreshState,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullRefreshState,
+                        isRefreshing = isRefreshing,
+                        containerColor = BbSurfaceElevated,
+                        color = BbOrange,
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    )
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
                 when {
-                    loading -> {
+                    initialLoading -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -312,7 +460,7 @@ fun AltHubApp() {
                                     modifier = Modifier.size(28.dp)
                                 )
                                 Text(
-                                    text = "SYNCING FEED...",
+                                    text = "LOADING FEED...",
                                     color = BbWhite,
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
@@ -357,7 +505,7 @@ fun AltHubApp() {
                                 item(key = "empty_feed") {
                                     EmptyFeedBox(
                                         title = "FEED IS EMPTY",
-                                        subtitle = discovery.errorMessage ?: "CDN: ${AutoDiscoveryRepository.MAIN_CDN_URL}"
+                                        subtitle = discovery.errorMessage ?: "Pull down to refresh"
                                     )
                                 }
                             } else {
@@ -391,17 +539,19 @@ fun AltHubApp() {
                     }
 
                     currentTab == NavDestination.VIDEOS -> {
-                        if (allVideos.isEmpty()) {
-                            EmptyFeedBox(
-                                title = "NO VIDEOS FOUND",
-                                subtitle = discovery.errorMessage ?: "Belum ada video di repository"
-                            )
-                        } else {
-                            LazyColumn(
-                                contentPadding = PaddingValues(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
+                        LazyColumn(
+                            contentPadding = PaddingValues(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            if (allVideos.isEmpty()) {
+                                item(key = "empty_videos") {
+                                    EmptyFeedBox(
+                                        title = "NO VIDEOS FOUND",
+                                        subtitle = discovery.errorMessage ?: "Pull down to refresh"
+                                    )
+                                }
+                            } else {
                                 itemsIndexed(allVideos, key = { _, item -> item.id }) { idx, video ->
                                     VideoStreamCard(
                                         indexNumber = allVideos.size - idx,
@@ -414,17 +564,19 @@ fun AltHubApp() {
                     }
 
                     currentTab == NavDestination.PHOTOS -> {
-                        if (allPhotos.isEmpty()) {
-                            EmptyFeedBox(
-                                title = "NO PHOTOS FOUND",
-                                subtitle = discovery.errorMessage ?: "Belum ada foto di repository"
-                            )
-                        } else {
-                            LazyColumn(
-                                contentPadding = PaddingValues(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
+                        LazyColumn(
+                            contentPadding = PaddingValues(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            if (allPhotos.isEmpty()) {
+                                item(key = "empty_photos") {
+                                    EmptyFeedBox(
+                                        title = "NO PHOTOS FOUND",
+                                        subtitle = discovery.errorMessage ?: "Pull down to refresh"
+                                    )
+                                }
+                            } else {
                                 items(allPhotos, key = { it.id }) { photo ->
                                     SocialStreamPostCard(
                                         item = photo,
@@ -436,18 +588,103 @@ fun AltHubApp() {
                     }
 
                     currentTab == NavDestination.INFO -> {
-                        if (allPosts.isEmpty()) {
-                            EmptyFeedBox(
-                                title = "NO INFO POSTS",
-                                subtitle = "Sumber: ${AutoDiscoveryRepository.MAIN_POST_URL}"
-                            )
-                        } else {
-                            LazyColumn(
-                                contentPadding = PaddingValues(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(14.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
+                        LazyColumn(
+                            contentPadding = PaddingValues(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            if (allPosts.isEmpty()) {
+                                item(key = "empty_info") {
+                                    EmptyFeedBox(
+                                        title = "NO INFO POSTS",
+                                        subtitle = "Pull down to refresh"
+                                    )
+                                }
+                            } else {
                                 items(allPosts, key = { it.id }) { post ->
+                                    SocialAnnouncementCard(post = post)
+                                }
+                            }
+                        }
+                    }
+
+                    currentTab == NavDestination.RNX -> {
+                        LazyColumn(
+                            contentPadding = PaddingValues(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            item(key = "rnx_header_banner") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(BbSurfaceElevated)
+                                        .border(1.dp, BbOrange)
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .background(BbOrange)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "RNX // PRIVATE STREAM",
+                                            color = BbWhite,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            text = "AUTO-LOCK ON EXIT",
+                                            color = BbMuted,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                    CubicActionButton(
+                                        text = "HIDE",
+                                        primary = false,
+                                        onClick = {
+                                            rnxUnlocked = false
+                                            rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                                            currentTab = NavDestination.FEED
+                                        }
+                                    )
+                                }
+                            }
+
+                            item(key = "rnx_chips") {
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(RnxChip.entries) { chip ->
+                                        CubicFilterChip(
+                                            label = chip.label,
+                                            selected = activeRnxChip == chip,
+                                            onClick = { activeRnxChip = chip }
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (rnxFilteredMedia.isEmpty() && rnxDiscovery.infoPosts.isEmpty()) {
+                                item(key = "empty_rnx") {
+                                    EmptyFeedBox(
+                                        title = "RNX STREAM EMPTY",
+                                        subtitle = rnxDiscovery.errorMessage ?: "Pull down to refresh"
+                                    )
+                                }
+                            } else {
+                                items(rnxFilteredMedia, key = { "rnx_${it.id}" }) { media ->
+                                    SocialStreamPostCard(
+                                        item = media,
+                                        onOpen = { openMedia(media) }
+                                    )
+                                }
+                                items(rnxDiscovery.infoPosts, key = { "rnx_post_${it.id}" }) { post ->
                                     SocialAnnouncementCard(post = post)
                                 }
                             }
@@ -465,11 +702,170 @@ fun AltHubApp() {
 
             CubicBottomNavBar(
                 current = currentTab,
+                rnxUnlocked = rnxUnlocked,
                 videoCount = allVideos.size,
                 photoCount = allPhotos.size,
                 infoCount = allPosts.size,
+                rnxCount = rnxDiscovery.mediaItems.size,
                 onSelect = { currentTab = it }
             )
+        }
+
+        if (showRnxAlert) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.82f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {}
+                    )
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(BbSurface)
+                        .border(1.dp, BbOrange)
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(BbOrange)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = RNX_ALERT_TITLE,
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            letterSpacing = 1.sp
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(BbBorder)
+                    )
+                    Text(
+                        text = RNX_ALERT_MESSAGE,
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        CubicActionButton(
+                            text = "ENTER RNX",
+                            icon = Icons.Default.NorthEast,
+                            primary = true,
+                            onClick = { showRnxAlert = false }
+                        )
+                    }
+                }
+            }
+        }
+
+        val activeWelcome = welcomePopupPost
+        if (activeWelcome != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.85f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {}
+                    )
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 540.dp)
+                        .background(BbSurface)
+                        .border(1.dp, BbBorderBright)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(BbSurfaceElevated)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(BbOrange)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = activeWelcome.title.uppercase(),
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        CubicSquareIconButton(
+                            icon = Icons.Default.Close,
+                            active = false,
+                            onClick = { welcomePopupPost = null }
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(BbBorder)
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            .padding(14.dp)
+                    ) {
+                        BBCodeView(bbcode = activeWelcome.bbcodeContent)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(BbBorder)
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        CubicActionButton(
+                            text = "CONTINUE",
+                            icon = Icons.Default.NorthEast,
+                            primary = true,
+                            onClick = { welcomePopupPost = null }
+                        )
+                    }
+                }
+            }
         }
 
         val activeMedia = selectedMedia
@@ -553,12 +949,12 @@ private fun TechnicalGridBackdrop() {
 
 @Composable
 private fun SocialTopBar(
+    rnxUnlocked: Boolean,
     searchExpanded: Boolean,
     searchQuery: String,
-    isSyncing: Boolean,
+    onLogoTap: () -> Unit,
     onToggleSearch: () -> Unit,
-    onSearchChange: (String) -> Unit,
-    onSync: () -> Unit
+    onSearchChange: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -574,13 +970,18 @@ private fun SocialTopBar(
             Box(
                 modifier = Modifier
                     .size(28.dp)
-                    .background(BbWhite),
+                    .background(BbWhite)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onLogoTap
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Box(
                     modifier = Modifier
                         .size(12.dp)
-                        .background(BbBlack)
+                        .background(if (rnxUnlocked) BbOrange else BbBlack)
                 )
             }
             Spacer(Modifier.width(10.dp))
@@ -629,13 +1030,6 @@ private fun SocialTopBar(
                 icon = if (searchExpanded) Icons.Default.Close else Icons.Default.Search,
                 active = searchExpanded,
                 onClick = onToggleSearch
-            )
-            Spacer(Modifier.width(8.dp))
-            CubicActionButton(
-                text = if (isSyncing) "..." else "SYNC",
-                icon = Icons.Default.Refresh,
-                primary = false,
-                onClick = onSync
             )
         }
 
@@ -1262,11 +1656,21 @@ private fun SocialAnnouncementCard(
 @Composable
 private fun CubicBottomNavBar(
     current: NavDestination,
+    rnxUnlocked: Boolean,
     videoCount: Int,
     photoCount: Int,
     infoCount: Int,
+    rnxCount: Int,
     onSelect: (NavDestination) -> Unit
 ) {
+    val destinations = remember(rnxUnlocked) {
+        if (rnxUnlocked) {
+            NavDestination.entries
+        } else {
+            NavDestination.entries.filter { it != NavDestination.RNX }
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1274,20 +1678,28 @@ private fun CubicBottomNavBar(
             .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        NavDestination.entries.forEach { dest ->
+        destinations.forEach { dest ->
             val selected = current == dest
             val badge = when (dest) {
                 NavDestination.FEED -> ""
                 NavDestination.VIDEOS -> " [$videoCount]"
                 NavDestination.PHOTOS -> " [$photoCount]"
                 NavDestination.INFO -> " [$infoCount]"
+                NavDestination.RNX -> " [$rnxCount]"
             }
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .height(44.dp)
                     .background(if (selected) BbWhite else BbSurface)
-                    .border(1.dp, if (selected) BbWhite else BbBorder)
+                    .border(
+                        1.dp,
+                        when {
+                            selected -> BbWhite
+                            dest == NavDestination.RNX -> BbOrange
+                            else -> BbBorder
+                        }
+                    )
                     .clickable { onSelect(dest) },
                 contentAlignment = Alignment.Center
             ) {
@@ -1299,7 +1711,11 @@ private fun CubicBottomNavBar(
                         Icon(
                             imageVector = dest.icon,
                             contentDescription = dest.label,
-                            tint = if (selected) BbBlack else BbMuted,
+                            tint = when {
+                                selected -> BbBlack
+                                dest == NavDestination.RNX -> BbOrange
+                                else -> BbMuted
+                            },
                             modifier = Modifier.size(15.dp)
                         )
                         if (selected) {
@@ -1314,7 +1730,11 @@ private fun CubicBottomNavBar(
                     Spacer(Modifier.height(2.dp))
                     Text(
                         text = "${dest.label}$badge",
-                        color = if (selected) BbBlack else BbMuted,
+                        color = when {
+                            selected -> BbBlack
+                            dest == NavDestination.RNX -> BbOrange
+                            else -> BbMuted
+                        },
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 9.sp,
@@ -1411,8 +1831,8 @@ private fun EmptyFeedBox(
 ) {
     Box(
         modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
+            .fillMaxWidth()
+            .padding(vertical = 48.dp, horizontal = 10.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(

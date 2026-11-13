@@ -20,7 +20,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 object LocalStreamServer {
-    private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AltHub/1.0"
     private val itemsById = ConcurrentHashMap<String, RemoteMediaItem>()
     private val headersById = ConcurrentHashMap<String, ContainerHeaderInfo>()
     private val executor = Executors.newCachedThreadPool()
@@ -62,20 +61,21 @@ object LocalStreamServer {
     }
 
     fun parseContainerHeaderFromStream(input: InputStream): ContainerHeaderInfo {
-        val magic = readExactBytes(input, 4)
-        val mStr = String(magic, Charsets.US_ASCII)
-        if (mStr != "SVCV" && mStr != "SICV") {
-            throw IOException("Invalid container magic: $mStr")
-        }
-        val lenBytes = readExactBytes(input, 4)
-        val headerLen = ByteBuffer.wrap(lenBytes).order(ByteOrder.LITTLE_ENDIAN).int
+        val prefix = readExactBytes(input, 8)
+        val headerLen = ByteBuffer.wrap(prefix, 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
         if (headerLen <= 0 || headerLen > 1024 * 1024) {
-            throw IOException("Invalid header length: $headerLen")
+            throw IOException("Invalid container header length")
         }
         val jsonBytes = readExactBytes(input, headerLen)
-        val obj = JSONObject(String(jsonBytes, Charsets.UTF_8))
+        val fullHeader = ByteArray(8 + headerLen)
+        System.arraycopy(prefix, 0, fullHeader, 0, 8)
+        System.arraycopy(jsonBytes, 0, fullHeader, 8, headerLen)
+
+        val parsedJson = NativeCore.parseContainerHeaderBytes(fullHeader, fullHeader.size)
+            ?: throw IOException("Native container header validation failed")
+        val obj = JSONObject(parsedJson)
         return ContainerHeaderInfo(
-            headerOffset = 8L + headerLen.toLong(),
+            headerOffset = obj.optLong("header_offset", (8 + headerLen).toLong()),
             compression = obj.optInt("compression", 0),
             originalExt = obj.optString("original_ext", "mp4").ifBlank { "mp4" },
             originalSize = obj.optLong("original_size", -1L)
@@ -300,7 +300,7 @@ object LocalStreamServer {
             instanceFollowRedirects = false
             connectTimeout = 15_000
             readTimeout = 30_000
-            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("User-Agent", NativeCore.getUserAgent())
             if (rangeHeader != null) {
                 setRequestProperty("Range", rangeHeader)
             }

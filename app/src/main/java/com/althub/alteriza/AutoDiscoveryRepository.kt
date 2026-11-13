@@ -19,9 +19,6 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 object AutoDiscoveryRepository {
-    const val MAIN_CDN_URL = "https://github.com/alteriza/althub/cdn.txt"
-    const val MAIN_POST_URL = "https://github.com/alteriza/althub/post/"
-    private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AltHub/1.0"
     private const val MAX_THUMB_DIM = 720
     private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "gif")
 
@@ -36,23 +33,41 @@ object AutoDiscoveryRepository {
 
     fun getCachedThumbnail(itemId: String): Bitmap? = memoryThumbs[itemId]
 
-    suspend fun discoverAll(): DiscoveryResult = withContext(Dispatchers.IO) {
+    suspend fun discoverAll(): DiscoveryResult =
+        discoverFromCdn(
+            cdnUrl = NativeCore.getPrimaryCdnUrl(),
+            postUrl = NativeCore.getPrimaryPostUrl(),
+            fallbackRepoUrl = NativeCore.getDefaultRepoUrl()
+        )
+
+    suspend fun discoverHiddenCdn(): DiscoveryResult =
+        discoverFromCdn(
+            cdnUrl = NativeCore.getHiddenCdnUrl(),
+            postUrl = null,
+            fallbackRepoUrl = null
+        )
+
+    private suspend fun discoverFromCdn(
+        cdnUrl: String,
+        postUrl: String?,
+        fallbackRepoUrl: String?
+    ): DiscoveryResult = withContext(Dispatchers.IO) {
         val mediaMap = linkedMapOf<String, RemoteMediaItem>()
         val postMap = linkedMapOf<String, InfoPost>()
         val activeSources = mutableListOf<String>()
         val errors = mutableListOf<String>()
 
-        val cdnRaw = fetchGitHubFileText(MAIN_CDN_URL)
+        val cdnRaw = fetchGitHubFileText(cdnUrl)
         val rawLines = cdnRaw
             ?.lines()
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
             .orEmpty()
 
-        val sourceUrls = if (rawLines.isNotEmpty()) {
-            rawLines
-        } else {
-            listOf("https://github.com/alteriza/althub")
+        val sourceUrls = when {
+            rawLines.isNotEmpty() -> rawLines
+            fallbackRepoUrl != null -> listOf(fallbackRepoUrl)
+            else -> emptyList()
         }
 
         for (src in sourceUrls) {
@@ -98,12 +113,14 @@ object AutoDiscoveryRepository {
             }
         }
 
-        val mainPostLoc = parseGitHubUrl(MAIN_POST_URL)
-        if (mainPostLoc != null) {
-            runCatching {
-                discoverGitHubPostsOnly(mainPostLoc, postMap)
-            }.onFailure {
-                errors.add("Post: ${it.message}")
+        if (postUrl != null) {
+            val mainPostLoc = parseGitHubUrl(postUrl)
+            if (mainPostLoc != null) {
+                runCatching {
+                    discoverGitHubPostsOnly(mainPostLoc, postMap)
+                }.onFailure {
+                    errors.add("Post: ${it.message}")
+                }
             }
         }
 
@@ -149,7 +166,7 @@ object AutoDiscoveryRepository {
     }
 
     private fun resolveDefaultBranch(owner: String, repo: String): String {
-        val apiUrl = "https://api.github.com/repos/$owner/$repo"
+        val apiUrl = NativeCore.buildGitHubRepoApi(owner, repo)
         val body = httpGetText(apiUrl, isGitHubApi = true)
         if (body != null) {
             val defaultBranch = runCatching {
@@ -181,7 +198,7 @@ object AutoDiscoveryRepository {
         val encodedPath = path.split('/').joinToString("/") { segment ->
             URLEncoder.encode(segment, "UTF-8").replace("+", "%20")
         }
-        return "https://raw.githubusercontent.com/$owner/$repo/$branch/$encodedPath"
+        return NativeCore.buildRawGitHubUrl(owner, repo, branch, encodedPath)
     }
 
     private fun isThumbnailFolderPath(path: String): Boolean {
@@ -202,7 +219,7 @@ object AutoDiscoveryRepository {
         postMap: MutableMap<String, InfoPost>
     ) {
         val branch = loc.branch ?: resolveDefaultBranch(loc.owner, loc.repo)
-        val treeUrl = "https://api.github.com/repos/${loc.owner}/${loc.repo}/git/trees/$branch?recursive=1"
+        val treeUrl = NativeCore.buildGitHubTreeApi(loc.owner, loc.repo, branch)
         val jsonText = httpGetText(treeUrl, isGitHubApi = true) ?: return
         val rootObj = JSONObject(jsonText)
         val treeArr = rootObj.optJSONArray("tree") ?: return
@@ -283,7 +300,7 @@ object AutoDiscoveryRepository {
     ) {
         val branch = loc.branch ?: resolveDefaultBranch(loc.owner, loc.repo)
         val targetPath = loc.subPath.ifBlank { "post" }
-        val contentsUrl = "https://api.github.com/repos/${loc.owner}/${loc.repo}/contents/$targetPath?ref=$branch"
+        val contentsUrl = NativeCore.buildGitHubContentsApi(loc.owner, loc.repo, targetPath, branch)
         val jsonText = httpGetText(contentsUrl, isGitHubApi = true) ?: return
         val arr = runCatching { JSONArray(jsonText) }.getOrNull() ?: return
         for (i in 0 until arr.length()) {
@@ -315,10 +332,6 @@ object AutoDiscoveryRepository {
             if (m != null) return m.groupValues[1]
         }
         return null
-    }
-
-    private fun buildDriveDownloadUrl(fileId: String): String {
-        return "https://drive.usercontent.google.com/download?id=$fileId&export=download&confirm=t"
     }
 
     private fun discoverGoogleDriveRoot(
@@ -355,7 +368,7 @@ object AutoDiscoveryRepository {
         postMap: MutableMap<String, InfoPost>
     ) {
         if (depth > 4) return
-        val embedUrl = "https://drive.google.com/embeddedfolderview?id=$folderId#list"
+        val embedUrl = NativeCore.buildDriveEmbedUrl(folderId)
         val html = httpGetText(embedUrl, isGitHubApi = false) ?: return
 
         val entryRegex = Regex(
@@ -382,7 +395,7 @@ object AutoDiscoveryRepository {
 
         for ((fid, name) in files) {
             val lower = name.lowercase()
-            val dlUrl = buildDriveDownloadUrl(fid)
+            val dlUrl = NativeCore.buildDriveDownloadUrl(fid)
             if (inThumbFolder && isImageExtension(name)) {
                 val targetKey = name.substringBeforeLast('.').lowercase()
                 thumbByTargetName[targetKey] = dlUrl
@@ -611,7 +624,7 @@ object AutoDiscoveryRepository {
             instanceFollowRedirects = false
             connectTimeout = 15_000
             readTimeout = 30_000
-            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("User-Agent", NativeCore.getUserAgent())
             if (isGitHubApi) {
                 setRequestProperty("Accept", "application/vnd.github+json")
             }
