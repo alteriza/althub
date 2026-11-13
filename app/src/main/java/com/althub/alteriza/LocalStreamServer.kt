@@ -75,6 +75,7 @@ object LocalStreamServer {
             ?: throw IOException("Native container header validation failed")
         val obj = JSONObject(parsedJson)
         return ContainerHeaderInfo(
+            isContainer = true,
             headerOffset = obj.optLong("header_offset", (8 + headerLen).toLong()),
             compression = obj.optInt("compression", 0),
             originalExt = obj.optString("original_ext", "mp4").ifBlank { "mp4" },
@@ -84,10 +85,49 @@ object LocalStreamServer {
 
     private fun resolveHeader(item: RemoteMediaItem): ContainerHeaderInfo {
         headersById[item.id]?.let { return it }
-        val conn = openRemoteConnection(item.mediaUrl, rangeHeader = "bytes=0-8191")
+        val conn = openRemoteConnection(
+            startUrl = item.mediaUrl,
+            rangeHeader = "bytes=0-8191",
+            extraHeaders = item.headers
+        )
         try {
+            val contentRange = conn.getHeaderField("Content-Range")
+            val totalFromRange = contentRange
+                ?.substringAfterLast('/', "")
+                ?.trim()
+                ?.toLongOrNull() ?: -1L
+            val fallbackTotal = if (totalFromRange > 0L) {
+                totalFromRange
+            } else if (conn.responseCode == 200 && conn.contentLengthLong > 0L) {
+                conn.contentLengthLong
+            } else if (item.sizeBytes > 0L) {
+                item.sizeBytes
+            } else {
+                -1L
+            }
+
+            val extFromUrl = item.fileName.substringAfterLast('.', "").lowercase().let {
+                if (it == "vcv" || it == "icv" || it.isBlank()) "mp4" else it
+            }
+
             BufferedInputStream(conn.inputStream, 16_384).use { bis ->
-                val info = parseContainerHeaderFromStream(bis)
+                bis.mark(16)
+                val magic = ByteArray(4)
+                val n = bis.read(magic)
+                val mStr = if (n == 4) String(magic, Charsets.US_ASCII) else ""
+                bis.reset()
+
+                val info = if (mStr == "SVCV" || mStr == "SICV") {
+                    parseContainerHeaderFromStream(bis)
+                } else {
+                    ContainerHeaderInfo(
+                        isContainer = false,
+                        headerOffset = 0L,
+                        compression = 0,
+                        originalExt = extFromUrl,
+                        originalSize = fallbackTotal
+                    )
+                }
                 headersById[item.id] = info
                 return info
             }
@@ -128,7 +168,7 @@ object LocalStreamServer {
                 val headerInfo = resolveHeader(item)
                 val mime = mimeTypeForExt(headerInfo.originalExt)
 
-                if (headerInfo.compression == 0) {
+                if (!headerInfo.isContainer || headerInfo.compression == 0) {
                     serveUncompressedRange(item, headerInfo, mime, method, rangeValue, out)
                 } else {
                     serveCompressedStream(item, headerInfo, mime, method, rangeValue, out)
@@ -179,11 +219,17 @@ object LocalStreamServer {
         val remoteStart = info.headerOffset + start
         val remoteRange = if (end >= start) {
             "bytes=$remoteStart-${info.headerOffset + end}"
-        } else {
+        } else if (remoteStart > 0L || isPartial) {
             "bytes=$remoteStart-"
+        } else {
+            null
         }
 
-        val conn = openRemoteConnection(item.mediaUrl, rangeHeader = remoteRange)
+        val conn = openRemoteConnection(
+            startUrl = item.mediaUrl,
+            rangeHeader = remoteRange,
+            extraHeaders = item.headers
+        )
         try {
             val respCode = conn.responseCode
             val contentLength = if (end >= start) (end - start + 1L) else conn.contentLengthLong
@@ -265,7 +311,11 @@ object LocalStreamServer {
 
         if (method == "HEAD") return
 
-        val conn = openRemoteConnection(item.mediaUrl, rangeHeader = "bytes=${info.headerOffset}-")
+        val conn = openRemoteConnection(
+            startUrl = item.mediaUrl,
+            rangeHeader = "bytes=${info.headerOffset}-",
+            extraHeaders = item.headers
+        )
         try {
             val respCode = conn.responseCode
             val rawIn = BufferedInputStream(conn.inputStream, 65_536)
@@ -292,6 +342,7 @@ object LocalStreamServer {
     fun openRemoteConnection(
         startUrl: String,
         rangeHeader: String? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
         hops: Int = 0
     ): HttpURLConnection {
         if (hops > 6) throw IOException("Too many redirects")
@@ -301,6 +352,9 @@ object LocalStreamServer {
             connectTimeout = 15_000
             readTimeout = 30_000
             setRequestProperty("User-Agent", NativeCore.getUserAgent())
+            for ((k, v) in extraHeaders) {
+                setRequestProperty(k, v)
+            }
             if (rangeHeader != null) {
                 setRequestProperty("Range", rangeHeader)
             }
@@ -310,7 +364,7 @@ object LocalStreamServer {
             val location = conn.getHeaderField("Location") ?: throw IOException("Missing redirect location")
             val nextUrl = URL(url, location).toString()
             conn.disconnect()
-            return openRemoteConnection(nextUrl, rangeHeader, hops + 1)
+            return openRemoteConnection(nextUrl, rangeHeader, extraHeaders, hops + 1)
         }
         if (code !in 200..299) {
             conn.disconnect()
@@ -353,6 +407,7 @@ object LocalStreamServer {
             "mov" -> "video/quicktime"
             "avi" -> "video/x-msvideo"
             "3gp" -> "video/3gpp"
+            "ts" -> "video/mp2t"
             else -> "video/mp4"
         }
     }

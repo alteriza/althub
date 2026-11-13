@@ -54,6 +54,13 @@ struct ParsedHeaderResponse {
     original_size: u64,
 }
 
+#[derive(Serialize)]
+struct HostResolution {
+    host_type: String,
+    resolved_url: String,
+    file_id: String,
+}
+
 struct ZstdStreamHandle {
     decoder: Decoder<'static>,
 }
@@ -193,6 +200,18 @@ fn encode_from_file(
     0
 }
 
+fn extract_segment_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
+    let idx = url.find(marker)?;
+    let rest = &url[idx + marker.len()..];
+    let end = rest.find(&['/', '?', '#', '&'][..]).unwrap_or(rest.len());
+    let seg = &rest[..end];
+    if seg.is_empty() {
+        None
+    } else {
+        Some(seg)
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_althub_alteriza_NativeCore_getPrimaryCdnUrl(
     env: JNIEnv,
@@ -230,12 +249,133 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_getDefaultRepoUrl(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getDeveloperProfileUrl(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let url = obf_str!("https://github.com/alteriza", 0x48);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_althub_alteriza_NativeCore_getUserAgent(
     env: JNIEnv,
     _this: JObject,
 ) -> jstring {
     let ua = obf_str!("Mozilla/5.0 (Linux; Android 14) AltHub/1.0", 0x4C);
     env.new_string(ua).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_getGofileTokenEndpoint(
+    env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let url = obf_str!("https://api.gofile.io/accounts", 0x2F);
+    env.new_string(url).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_resolveHostEndpoint(
+    mut env: JNIEnv,
+    _this: JObject,
+    raw_url: JString,
+) -> jstring {
+    let input: String = env.get_string(&raw_url).map(Into::into).unwrap_or_default();
+    let trimmed = input.trim().to_string();
+    let lower = trimmed.to_lowercase();
+
+    let pd_host = obf_str!("pixeldrain.com", 0x19);
+    let gf_host = obf_str!("gofile.io", 0x22);
+    let af_host = obf_str!("acefile.co", 0x31);
+    let fd_host = obf_str!("filedom", 0x44);
+    let gd_host = obf_str!("drive.google.com", 0x51);
+    let docs_host = obf_str!("docs.google.com", 0x52);
+    let gh_host = obf_str!("github.com", 0x63);
+    let gh_raw = obf_str!("raw.githubusercontent.com", 0x64);
+
+    let res = if lower.contains(&pd_host) {
+        if let Some(id) = extract_segment_after(&trimmed, "/u/")
+            .or_else(|| extract_segment_after(&trimmed, "/api/file/"))
+        {
+            let api_base = obf_str!("https://pixeldrain.com/api/file/", 0x1A);
+            HostResolution {
+                host_type: "pixeldrain".into(),
+                resolved_url: format!("{}{}", api_base, id),
+                file_id: id.into(),
+            }
+        } else if let Some(lid) = extract_segment_after(&trimmed, "/l/") {
+            let api_list = obf_str!("https://pixeldrain.com/api/list/", 0x1B);
+            HostResolution {
+                host_type: "pixeldrain_list".into(),
+                resolved_url: format!("{}{}", api_list, lid),
+                file_id: lid.into(),
+            }
+        } else {
+            HostResolution {
+                host_type: "direct".into(),
+                resolved_url: trimmed,
+                file_id: String::new(),
+            }
+        }
+    } else if lower.contains(&gf_host) {
+        let id = extract_segment_after(&trimmed, "/d/").unwrap_or("");
+        let api_base = obf_str!("https://api.gofile.io/contents/", 0x23);
+        let wt = obf_str!("?wt=4fd6sg89d7s6", 0x24);
+        HostResolution {
+            host_type: "gofile".into(),
+            resolved_url: if id.is_empty() {
+                trimmed
+            } else {
+                format!("{}{}{}", api_base, id, wt)
+            },
+            file_id: id.into(),
+        }
+    } else if lower.contains(&af_host) {
+        let id = extract_segment_after(&trimmed, "/f/")
+            .or_else(|| extract_segment_after(&trimmed, "/player/"))
+            .unwrap_or("");
+        HostResolution {
+            host_type: "acefile".into(),
+            resolved_url: trimmed,
+            file_id: id.into(),
+        }
+    } else if lower.contains(&fd_host) {
+        HostResolution {
+            host_type: "filedom".into(),
+            resolved_url: trimmed,
+            file_id: String::new(),
+        }
+    } else if lower.contains(&gd_host) || lower.contains(&docs_host) {
+        if lower.contains("/folders/") {
+            HostResolution {
+                host_type: "gdrive_folder".into(),
+                resolved_url: trimmed,
+                file_id: String::new(),
+            }
+        } else {
+            HostResolution {
+                host_type: "gdrive_file".into(),
+                resolved_url: trimmed,
+                file_id: String::new(),
+            }
+        }
+    } else if lower.contains(&gh_host) || lower.contains(&gh_raw) {
+        HostResolution {
+            host_type: "github".into(),
+            resolved_url: trimmed,
+            file_id: String::new(),
+        }
+    } else {
+        HostResolution {
+            host_type: "direct".into(),
+            resolved_url: trimmed,
+            file_id: String::new(),
+        }
+    };
+
+    let json = serde_json::to_string(&res).unwrap_or_default();
+    env.new_string(json).unwrap_or_default().into_raw()
 }
 
 #[no_mangle]

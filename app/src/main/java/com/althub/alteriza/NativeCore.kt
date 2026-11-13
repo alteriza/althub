@@ -13,7 +13,13 @@ object NativeCore {
 
     external fun getDefaultRepoUrl(): String
 
+    external fun getDeveloperProfileUrl(): String
+
     external fun getUserAgent(): String
+
+    external fun getGofileTokenEndpoint(): String
+
+    external fun resolveHostEndpoint(rawUrl: String): String
 
     external fun buildGitHubRepoApi(owner: String, repo: String): String
 

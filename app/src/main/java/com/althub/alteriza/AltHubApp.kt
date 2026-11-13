@@ -1,17 +1,27 @@
 package com.althub.alteriza
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
@@ -21,6 +31,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -51,19 +62,30 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.NorthEast
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -97,6 +119,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -104,6 +127,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -121,9 +145,15 @@ import com.althub.alteriza.ui.theme.BbSurfaceElevated
 import com.althub.alteriza.ui.theme.BbWhite
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-private const val CORNX_ALERT_TITLE = "CORNX // HIDDEN SECTION"
-private const val CORNX_ALERT_MESSAGE = "/* [ADULT ONLY] */"
+// <RNX_ALERT_TAG>
+private const val RNX_ALERT_TITLE = "RNX // HIDDEN SECTION"
+private const val RNX_ALERT_MESSAGE = "/* [ISI_PESAN_ALERT_RNX_DISINI] */"
+// </RNX_ALERT_TAG>
 
 private const val PREFS_NAME = "althub_prefs"
 private const val KEY_WELCOME_SHOWN = "welcome_popup_shown"
@@ -133,7 +163,7 @@ private enum class NavDestination(val label: String, val icon: ImageVector) {
     VIDEOS("VIDEOS", Icons.Default.Movie),
     PHOTOS("PHOTOS", Icons.Default.Image),
     INFO("INFO", Icons.Default.Campaign),
-    CORNX("CORNX", Icons.Default.Lock)
+    RNX("RNX", Icons.Default.Lock)
 }
 
 private enum class FeedChip(val label: String) {
@@ -143,10 +173,16 @@ private enum class FeedChip(val label: String) {
     INFO("INFO")
 }
 
-private enum class CORNXChip(val label: String) {
+private enum class RnxChip(val label: String) {
     ALL("ALL"),
     VIDEOS("VIDEOS"),
     PHOTOS("PHOTOS")
+}
+
+private enum class VideoResizeMode(val label: String) {
+    FIT("FIT"),
+    FILL("FILL"),
+    STRETCH("16:9")
 }
 
 private sealed class TimelineEntry {
@@ -178,19 +214,30 @@ fun AltHubApp() {
     val prefs = remember(context) { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
     var currentTab by remember { mutableStateOf(NavDestination.FEED) }
+    var settingsOpen by remember { mutableStateOf(false) }
     var activeFeedChip by remember { mutableStateOf(FeedChip.ALL) }
-    var activeCORNXChip by remember { mutableStateOf(CORNXChip.ALL) }
+    var activeRnxChip by remember { mutableStateOf(RnxChip.ALL) }
     var searchExpanded by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var initialLoading by remember { mutableStateOf(true) }
     var isRefreshing by remember { mutableStateOf(false) }
 
-    var CORNXUnlocked by remember { mutableStateOf(false) }
-    var showCORNXAlert by remember { mutableStateOf(false) }
+    var rnxUnlocked by remember { mutableStateOf(false) }
+    var showRnxAlert by remember { mutableStateOf(false) }
     var logoTapCount by remember { mutableIntStateOf(0) }
     var lastLogoTapMs by remember { mutableLongStateOf(0L) }
 
     var welcomePopupPost by remember { mutableStateOf<InfoPost?>(null) }
+
+    var hwAcceleration by remember { mutableStateOf(AppStorageManager.isHwAccelerationEnabled(context)) }
+    var downloadFormatPref by remember { mutableStateOf(AppStorageManager.getDownloadFormatPref(context)) }
+    var pendingDownloadItem by remember { mutableStateOf<RemoteMediaItem?>(null) }
+    var isDownloading by remember { mutableStateOf(false) }
+    var storageRefreshTick by remember { mutableIntStateOf(0) }
+
+    val legacyPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
 
     var discovery by remember {
         mutableStateOf(
@@ -202,7 +249,7 @@ fun AltHubApp() {
         )
     }
 
-    var CORNXDiscovery by remember {
+    var rnxDiscovery by remember {
         mutableStateOf(
             DiscoveryResult(
                 mediaItems = emptyList(),
@@ -215,6 +262,8 @@ fun AltHubApp() {
     var selectedMedia by remember { mutableStateOf<RemoteMediaItem?>(null) }
 
     fun openMedia(item: RemoteMediaItem) {
+        AppStorageManager.recordHistory(context, item)
+        storageRefreshTick++
         val cachedThumb = AutoDiscoveryRepository.getCachedThumbnail(item.id)
         if (cachedThumb != null) {
             activity?.requestedOrientation = if (cachedThumb.width > cachedThumb.height) {
@@ -231,6 +280,48 @@ fun AltHubApp() {
         selectedMedia = null
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         applyImmersiveSystemBars(activity)
+    }
+
+    fun executeDownload(item: RemoteMediaItem, saveAsContainer: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            legacyPermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+        scope.launch {
+            isDownloading = true
+            val res = AppStorageManager.downloadMediaItem(context, item, saveAsContainer)
+            isDownloading = false
+            storageRefreshTick++
+            res.onSuccess { file ->
+                Toast.makeText(
+                    context,
+                    "Saved: ${file.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }.onFailure { err ->
+                Toast.makeText(
+                    context,
+                    "Download failed: ${err.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    fun requestDownload(item: RemoteMediaItem) {
+        when (downloadFormatPref) {
+            DownloadFormatPref.ASK -> {
+                pendingDownloadItem = item
+            }
+            DownloadFormatPref.CONTAINER -> {
+                executeDownload(item, saveAsContainer = true)
+            }
+            DownloadFormatPref.ORIGINAL -> {
+                executeDownload(item, saveAsContainer = false)
+            }
+        }
     }
 
     suspend fun syncRepository(fromPullRefresh: Boolean = false) {
@@ -253,8 +344,8 @@ fun AltHubApp() {
             }
         }
 
-        if (CORNXUnlocked) {
-            CORNXDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+        if (rnxUnlocked) {
+            rnxDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
         }
 
         initialLoading = false
@@ -264,11 +355,11 @@ fun AltHubApp() {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
-                CORNXUnlocked = false
-                showCORNXAlert = false
+                rnxUnlocked = false
+                showRnxAlert = false
                 logoTapCount = 0
-                CORNXDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
-                if (currentTab == NavDestination.CORNX) {
+                rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                if (currentTab == NavDestination.RNX) {
                     currentTab = NavDestination.FEED
                 }
             }
@@ -312,12 +403,12 @@ fun AltHubApp() {
         }
     }
 
-    val CORNXFilteredMedia = remember(CORNXDiscovery.mediaItems, activeCORNXChip, searchQuery) {
-        CORNXDiscovery.mediaItems.filter { item ->
-            val matchChip = when (activeCORNXChip) {
-                CORNXChip.ALL -> true
-                CORNXChip.VIDEOS -> item.kind == MediaKind.VIDEO
-                CORNXChip.PHOTOS -> item.kind == MediaKind.IMAGE
+    val rnxFilteredMedia = remember(rnxDiscovery.mediaItems, activeRnxChip, searchQuery) {
+        rnxDiscovery.mediaItems.filter { item ->
+            val matchChip = when (activeRnxChip) {
+                RnxChip.ALL -> true
+                RnxChip.VIDEOS -> item.kind == MediaKind.VIDEO
+                RnxChip.PHOTOS -> item.kind == MediaKind.IMAGE
             }
             val matchQuery = searchQuery.isBlank() ||
                 item.title.contains(searchQuery, true) ||
@@ -378,7 +469,8 @@ fun AltHubApp() {
                 .windowInsetsPadding(WindowInsets.safeDrawing)
         ) {
             SocialTopBar(
-                CORNXUnlocked = CORNXUnlocked,
+                rnxUnlocked = rnxUnlocked,
+                settingsOpen = settingsOpen,
                 searchExpanded = searchExpanded,
                 searchQuery = searchQuery,
                 onLogoTap = {
@@ -387,23 +479,26 @@ fun AltHubApp() {
                     lastLogoTapMs = now
                     if (logoTapCount >= 5) {
                         logoTapCount = 0
-                        if (!CORNXUnlocked) {
-                            CORNXUnlocked = true
-                            showCORNXAlert = true
-                            currentTab = NavDestination.CORNX
+                        settingsOpen = false
+                        if (!rnxUnlocked) {
+                            rnxUnlocked = true
+                            showRnxAlert = true
+                            currentTab = NavDestination.RNX
                             scope.launch {
                                 isRefreshing = true
-                                CORNXDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+                                rnxDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
                                 isRefreshing = false
                             }
                         } else {
-                            CORNXUnlocked = false
-                            showCORNXAlert = false
-                            CORNXDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
-                            if (currentTab == NavDestination.CORNX) {
+                            rnxUnlocked = false
+                            showRnxAlert = false
+                            rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                            if (currentTab == NavDestination.RNX) {
                                 currentTab = NavDestination.FEED
                             }
                         }
+                    } else if (logoTapCount == 1) {
+                        settingsOpen = !settingsOpen
                     }
                 },
                 onToggleSearch = {
@@ -420,270 +515,321 @@ fun AltHubApp() {
                     .background(BbBorder)
             )
 
-            val pullRefreshState = rememberPullToRefreshState()
+            if (settingsOpen) {
+                BackHandler {
+                    settingsOpen = false
+                }
+                SettingsScreen(
+                    hwAcceleration = hwAcceleration,
+                    downloadFormatPref = downloadFormatPref,
+                    refreshTick = storageRefreshTick,
+                    onToggleHwAcceleration = { enabled ->
+                        hwAcceleration = enabled
+                        AppStorageManager.setHwAccelerationEnabled(context, enabled)
+                    },
+                    onSelectDownloadFormatPref = { pref ->
+                        downloadFormatPref = pref
+                        AppStorageManager.setDownloadFormatPref(context, pref)
+                    },
+                    onClearCache = {
+                        AppStorageManager.clearAllCache(context)
+                        storageRefreshTick++
+                        Toast.makeText(context, "Cache cleared", Toast.LENGTH_SHORT).show()
+                    },
+                    onClearHistory = {
+                        AppStorageManager.clearHistory(context)
+                        storageRefreshTick++
+                        Toast.makeText(context, "History cleared", Toast.LENGTH_SHORT).show()
+                    },
+                    onOpenHistoryItem = { rec ->
+                        settingsOpen = false
+                        openMedia(
+                            RemoteMediaItem(
+                                id = rec.id,
+                                title = rec.title,
+                                fileName = rec.fileName,
+                                kind = rec.kind,
+                                sourceType = rec.sourceType,
+                                mediaUrl = rec.mediaUrl,
+                                thumbnailUrl = rec.thumbnailUrl,
+                                sizeBytes = 0L,
+                                folderPath = "/history",
+                                isContainer = rec.isContainer
+                            )
+                        )
+                    },
+                    onDeleteDownloadedFile = { entry ->
+                        runCatching { File(entry.path).delete() }
+                        storageRefreshTick++
+                    },
+                    onClose = { settingsOpen = false },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                )
+            } else {
+                val pullRefreshState = rememberPullToRefreshState()
 
-            PullToRefreshBox(
-                isRefreshing = isRefreshing,
-                onRefresh = {
-                    scope.launch { syncRepository(fromPullRefresh = true) }
-                },
-                state = pullRefreshState,
-                indicator = {
-                    PullToRefreshDefaults.Indicator(
-                        state = pullRefreshState,
-                        isRefreshing = isRefreshing,
-                        containerColor = BbSurfaceElevated,
-                        color = BbOrange,
-                        modifier = Modifier.align(Alignment.TopCenter)
-                    )
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                when {
-                    initialLoading -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                                modifier = Modifier
-                                    .background(BbSurface)
-                                    .border(1.dp, BbBorder)
-                                    .padding(24.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    color = BbWhite,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                                Text(
-                                    text = "LOADING FEED...",
-                                    color = BbWhite,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    letterSpacing = 1.sp
-                                )
-                            }
-                        }
-                    }
-
-                    currentTab == NavDestination.FEED -> {
-                        val featuredItem = allVideos.firstOrNull() ?: allPhotos.firstOrNull()
-                        LazyColumn(
-                            contentPadding = PaddingValues(bottom = 20.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            if (featuredItem != null && searchQuery.isBlank() && activeFeedChip == FeedChip.ALL) {
-                                item(key = "hero_${featuredItem.id}") {
-                                    FeaturedMediaSpotlight(
-                                        item = featuredItem,
-                                        onOpen = { openMedia(featuredItem) }
+                PullToRefreshBox(
+                    isRefreshing = isRefreshing,
+                    onRefresh = {
+                        scope.launch { syncRepository(fromPullRefresh = true) }
+                    },
+                    state = pullRefreshState,
+                    indicator = {
+                        PullToRefreshDefaults.Indicator(
+                            state = pullRefreshState,
+                            isRefreshing = isRefreshing,
+                            containerColor = BbSurfaceElevated,
+                            color = BbOrange,
+                            modifier = Modifier.align(Alignment.TopCenter)
+                        )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    when {
+                        initialLoading -> {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                    modifier = Modifier
+                                        .background(BbSurface)
+                                        .border(1.dp, BbBorder)
+                                        .padding(24.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = BbWhite,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Text(
+                                        text = "LOADING FEED...",
+                                        color = BbWhite,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        letterSpacing = 1.sp
                                     )
                                 }
                             }
+                        }
 
-                            item(key = "feed_chips") {
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    items(FeedChip.entries) { chip ->
-                                        CubicFilterChip(
-                                            label = chip.label,
-                                            selected = activeFeedChip == chip,
-                                            onClick = { activeFeedChip = chip }
+                        currentTab == NavDestination.FEED -> {
+                            val featuredItem = allVideos.firstOrNull() ?: allPhotos.firstOrNull()
+                            LazyColumn(
+                                contentPadding = PaddingValues(bottom = 20.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                if (featuredItem != null && searchQuery.isBlank() && activeFeedChip == FeedChip.ALL) {
+                                    item(key = "hero_${featuredItem.id}") {
+                                        FeaturedMediaSpotlight(
+                                            item = featuredItem,
+                                            onOpen = { openMedia(featuredItem) }
+                                        )
+                                    }
+                                }
+
+                                item(key = "feed_chips") {
+                                    LazyRow(
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        items(FeedChip.entries) { chip ->
+                                            CubicFilterChip(
+                                                label = chip.label,
+                                                selected = activeFeedChip == chip,
+                                                onClick = { activeFeedChip = chip }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (timelineEntries.isEmpty()) {
+                                    item(key = "empty_feed") {
+                                        EmptyFeedBox(
+                                            title = "FEED IS EMPTY",
+                                            subtitle = discovery.errorMessage ?: "Pull down to refresh"
+                                        )
+                                    }
+                                } else {
+                                    items(
+                                        items = timelineEntries,
+                                        key = { entry ->
+                                            when (entry) {
+                                                is TimelineEntry.MediaEntry -> "m_${entry.item.id}"
+                                                is TimelineEntry.PostEntry -> "p_${entry.post.id}"
+                                            }
+                                        }
+                                    ) { entry ->
+                                        when (entry) {
+                                            is TimelineEntry.MediaEntry -> {
+                                                SocialStreamPostCard(
+                                                    item = entry.item,
+                                                    onOpen = { openMedia(entry.item) },
+                                                    onDownload = { requestDownload(entry.item) },
+                                                    modifier = Modifier.padding(horizontal = 14.dp)
+                                                )
+                                            }
+                                            is TimelineEntry.PostEntry -> {
+                                                SocialAnnouncementCard(
+                                                    post = entry.post,
+                                                    modifier = Modifier.padding(horizontal = 14.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        currentTab == NavDestination.VIDEOS -> {
+                            LazyColumn(
+                                contentPadding = PaddingValues(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                if (allVideos.isEmpty()) {
+                                    item(key = "empty_videos") {
+                                        EmptyFeedBox(
+                                            title = "NO VIDEOS FOUND",
+                                            subtitle = discovery.errorMessage ?: "Pull down to refresh"
+                                        )
+                                    }
+                                } else {
+                                    itemsIndexed(allVideos, key = { _, item -> item.id }) { idx, video ->
+                                        VideoStreamCard(
+                                            indexNumber = allVideos.size - idx,
+                                            item = video,
+                                            onWatch = { openMedia(video) },
+                                            onDownload = { requestDownload(video) }
                                         )
                                     }
                                 }
                             }
+                        }
 
-                            if (timelineEntries.isEmpty()) {
-                                item(key = "empty_feed") {
-                                    EmptyFeedBox(
-                                        title = "FEED IS EMPTY",
-                                        subtitle = discovery.errorMessage ?: "Pull down to refresh"
-                                    )
-                                }
-                            } else {
-                                items(
-                                    items = timelineEntries,
-                                    key = { entry ->
-                                        when (entry) {
-                                            is TimelineEntry.MediaEntry -> "m_${entry.item.id}"
-                                            is TimelineEntry.PostEntry -> "p_${entry.post.id}"
-                                        }
+                        currentTab == NavDestination.PHOTOS -> {
+                            LazyColumn(
+                                contentPadding = PaddingValues(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                if (allPhotos.isEmpty()) {
+                                    item(key = "empty_photos") {
+                                        EmptyFeedBox(
+                                            title = "NO PHOTOS FOUND",
+                                            subtitle = discovery.errorMessage ?: "Pull down to refresh"
+                                        )
                                     }
-                                ) { entry ->
-                                    when (entry) {
-                                        is TimelineEntry.MediaEntry -> {
-                                            SocialStreamPostCard(
-                                                item = entry.item,
-                                                onOpen = { openMedia(entry.item) },
-                                                modifier = Modifier.padding(horizontal = 14.dp)
-                                            )
-                                        }
-                                        is TimelineEntry.PostEntry -> {
-                                            SocialAnnouncementCard(
-                                                post = entry.post,
-                                                modifier = Modifier.padding(horizontal = 14.dp)
-                                            )
-                                        }
+                                } else {
+                                    items(allPhotos, key = { it.id }) { photo ->
+                                        SocialStreamPostCard(
+                                            item = photo,
+                                            onOpen = { openMedia(photo) },
+                                            onDownload = { requestDownload(photo) }
+                                        )
                                     }
                                 }
                             }
                         }
-                    }
 
-                    currentTab == NavDestination.VIDEOS -> {
-                        LazyColumn(
-                            contentPadding = PaddingValues(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            if (allVideos.isEmpty()) {
-                                item(key = "empty_videos") {
-                                    EmptyFeedBox(
-                                        title = "NO VIDEOS FOUND",
-                                        subtitle = discovery.errorMessage ?: "Pull down to refresh"
-                                    )
-                                }
-                            } else {
-                                itemsIndexed(allVideos, key = { _, item -> item.id }) { idx, video ->
-                                    VideoStreamCard(
-                                        indexNumber = allVideos.size - idx,
-                                        item = video,
-                                        onWatch = { openMedia(video) }
-                                    )
+                        currentTab == NavDestination.INFO -> {
+                            LazyColumn(
+                                contentPadding = PaddingValues(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                if (allPosts.isEmpty()) {
+                                    item(key = "empty_info") {
+                                        EmptyFeedBox(
+                                            title = "NO INFO POSTS",
+                                            subtitle = "Pull down to refresh"
+                                        )
+                                    }
+                                } else {
+                                    items(allPosts, key = { it.id }) { post ->
+                                        SocialAnnouncementCard(post = post)
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    currentTab == NavDestination.PHOTOS -> {
-                        LazyColumn(
-                            contentPadding = PaddingValues(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            if (allPhotos.isEmpty()) {
-                                item(key = "empty_photos") {
-                                    EmptyFeedBox(
-                                        title = "NO PHOTOS FOUND",
-                                        subtitle = discovery.errorMessage ?: "Pull down to refresh"
-                                    )
-                                }
-                            } else {
-                                items(allPhotos, key = { it.id }) { photo ->
-                                    SocialStreamPostCard(
-                                        item = photo,
-                                        onOpen = { openMedia(photo) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    currentTab == NavDestination.INFO -> {
-                        LazyColumn(
-                            contentPadding = PaddingValues(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            if (allPosts.isEmpty()) {
-                                item(key = "empty_info") {
-                                    EmptyFeedBox(
-                                        title = "NO INFO POSTS",
-                                        subtitle = "Pull down to refresh"
-                                    )
-                                }
-                            } else {
-                                items(allPosts, key = { it.id }) { post ->
-                                    SocialAnnouncementCard(post = post)
-                                }
-                            }
-                        }
-                    }
-
-                    currentTab == NavDestination.CORNX -> {
-                        LazyColumn(
-                            contentPadding = PaddingValues(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            item(key = "CORNX_header_banner") {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(BbSurfaceElevated)
-                                        .border(1.dp, BbOrange)
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
+                        currentTab == NavDestination.RNX -> {
+                            LazyColumn(
+                                contentPadding = PaddingValues(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                item(key = "rnx_header_banner") {
+                                    Row(
                                         modifier = Modifier
-                                            .size(8.dp)
-                                            .background(BbOrange)
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
+                                            .fillMaxWidth()
+                                            .background(BbSurfaceElevated)
+                                            .border(1.dp, BbOrange)
+                                            .padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .background(BbOrange)
+                                        )
+                                        Spacer(Modifier.width(10.dp))
                                         Text(
-                                            text = "CORNX // PRIVATE STREAM",
+                                            text = "RNX // PRIVATE STREAM",
                                             color = BbWhite,
                                             fontFamily = FontFamily.Monospace,
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 12.sp
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.weight(1f)
                                         )
-                                        Text(
-                                            text = "AUTO-LOCK ON EXIT",
-                                            color = BbMuted,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 10.sp
+                                        CubicActionButton(
+                                            text = "HIDE",
+                                            primary = false,
+                                            onClick = {
+                                                rnxUnlocked = false
+                                                rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                                                currentTab = NavDestination.FEED
+                                            }
                                         )
                                     }
-                                    CubicActionButton(
-                                        text = "HIDE",
-                                        primary = false,
-                                        onClick = {
-                                            CORNXUnlocked = false
-                                            CORNXDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
-                                            currentTab = NavDestination.FEED
+                                }
+
+                                item(key = "rnx_chips") {
+                                    LazyRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        items(RnxChip.entries) { chip ->
+                                            CubicFilterChip(
+                                                label = chip.label,
+                                                selected = activeRnxChip == chip,
+                                                onClick = { activeRnxChip = chip }
+                                            )
                                         }
-                                    )
-                                }
-                            }
-
-                            item(key = "CORNX_chips") {
-                                LazyRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    items(CORNXChip.entries) { chip ->
-                                        CubicFilterChip(
-                                            label = chip.label,
-                                            selected = activeCORNXChip == chip,
-                                            onClick = { activeCORNXChip = chip }
-                                        )
                                     }
                                 }
-                            }
 
-                            if (CORNXFilteredMedia.isEmpty() && CORNXDiscovery.infoPosts.isEmpty()) {
-                                item(key = "empty_CORNX") {
-                                    EmptyFeedBox(
-                                        title = "CORNX STREAM EMPTY",
-                                        subtitle = CORNXDiscovery.errorMessage ?: "Pull down to refresh"
-                                    )
-                                }
-                            } else {
-                                items(CORNXFilteredMedia, key = { "CORNX_${it.id}" }) { media ->
-                                    SocialStreamPostCard(
-                                        item = media,
-                                        onOpen = { openMedia(media) }
-                                    )
-                                }
-                                items(CORNXDiscovery.infoPosts, key = { "CORNX_post_${it.id}" }) { post ->
-                                    SocialAnnouncementCard(post = post)
+                                if (rnxFilteredMedia.isEmpty() && rnxDiscovery.infoPosts.isEmpty()) {
+                                    item(key = "empty_rnx") {
+                                        EmptyFeedBox(
+                                            title = "RNX STREAM EMPTY",
+                                            subtitle = rnxDiscovery.errorMessage ?: "Pull down to refresh"
+                                        )
+                                    }
+                                } else {
+                                    items(rnxFilteredMedia, key = { "rnx_${it.id}" }) { media ->
+                                        SocialStreamPostCard(
+                                            item = media,
+                                            onOpen = { openMedia(media) },
+                                            onDownload = { requestDownload(media) }
+                                        )
+                                    }
+                                    items(rnxDiscovery.infoPosts, key = { "rnx_post_${it.id}" }) { post ->
+                                        SocialAnnouncementCard(post = post)
+                                    }
                                 }
                             }
                         }
@@ -700,16 +846,139 @@ fun AltHubApp() {
 
             CubicBottomNavBar(
                 current = currentTab,
-                CORNXUnlocked = CORNXUnlocked,
+                settingsOpen = settingsOpen,
+                rnxUnlocked = rnxUnlocked,
                 videoCount = allVideos.size,
                 photoCount = allPhotos.size,
                 infoCount = allPosts.size,
-                CORNXCount = CORNXDiscovery.mediaItems.size,
-                onSelect = { currentTab = it }
+                rnxCount = rnxDiscovery.mediaItems.size,
+                onSelect = { dest ->
+                    settingsOpen = false
+                    currentTab = dest
+                }
             )
         }
 
-        if (showCORNXAlert) {
+        if (isDownloading) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(top = 62.dp)
+                    .background(BbSurfaceElevated)
+                    .border(1.dp, BbOrange)
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        color = BbOrange,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "DOWNLOADING TO STORAGE...",
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+        }
+
+        val dlTarget = pendingDownloadItem
+        if (dlTarget != null) {
+            val containerExt = if (dlTarget.kind == MediaKind.VIDEO) ".VCV" else ".ICV"
+            val rawExt = dlTarget.fileName.substringAfterLast('.', "").uppercase().let {
+                if (it == "VCV" || it == "ICV" || it.isBlank()) {
+                    if (dlTarget.kind == MediaKind.VIDEO) "MP4" else "JPG"
+                } else {
+                    it
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.84f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {}
+                    )
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(BbSurface)
+                        .border(1.dp, BbBorderBright)
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).background(BbOrange))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "DOWNLOAD FORMAT",
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        CubicSquareIconButton(
+                            icon = Icons.Default.Close,
+                            active = false,
+                            onClick = { pendingDownloadItem = null }
+                        )
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(BbBorder))
+                    Text(
+                        text = "Simpan \"${dlTarget.title}\" dalam format container $containerExt atau format asli ($rawExt)?",
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                    Text(
+                        text = "Lokasi: ${AppStorageManager.getDefaultDownloadDir(context).absolutePath}",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CubicActionButton(
+                            text = "FORMAT $containerExt",
+                            primary = true,
+                            onClick = {
+                                val target = dlTarget
+                                pendingDownloadItem = null
+                                executeDownload(target, saveAsContainer = true)
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CubicActionButton(
+                            text = "ASLI ($rawExt)",
+                            primary = false,
+                            onClick = {
+                                val target = dlTarget
+                                pendingDownloadItem = null
+                                executeDownload(target, saveAsContainer = false)
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showRnxAlert) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -738,7 +1007,7 @@ fun AltHubApp() {
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = CORNX_ALERT_TITLE,
+                            text = RNX_ALERT_TITLE,
                             color = BbWhite,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -753,7 +1022,7 @@ fun AltHubApp() {
                             .background(BbBorder)
                     )
                     Text(
-                        text = CORNX_ALERT_MESSAGE,
+                        text = RNX_ALERT_MESSAGE,
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
@@ -764,10 +1033,10 @@ fun AltHubApp() {
                         horizontalArrangement = Arrangement.End
                     ) {
                         CubicActionButton(
-                            text = "ENTER CORNX",
+                            text = "ENTER RNX",
                             icon = Icons.Default.NorthEast,
                             primary = true,
-                            onClick = { showCORNXAlert = false }
+                            onClick = { showRnxAlert = false }
                         )
                     }
                 }
@@ -887,6 +1156,7 @@ fun AltHubApp() {
                 if (activeMedia.kind == MediaKind.VIDEO) {
                     CubicStreamingVideoPlayer(
                         item = activeMedia,
+                        hwAcceleration = hwAcceleration,
                         onOrientationResolved = { isLandscape ->
                             activity?.requestedOrientation = if (isLandscape) {
                                 ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -895,6 +1165,17 @@ fun AltHubApp() {
                             }
                             applyImmersiveSystemBars(activity)
                         },
+                        onToggleOrientation = {
+                            val currentOrient = activity?.requestedOrientation
+                            val nextLandscape = currentOrient != ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            activity?.requestedOrientation = if (nextLandscape) {
+                                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            } else {
+                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                            }
+                            applyImmersiveSystemBars(activity)
+                        },
+                        onDownload = { requestDownload(activeMedia) },
                         onBack = { closeViewer() }
                     )
                 } else {
@@ -908,7 +1189,390 @@ fun AltHubApp() {
                             }
                             applyImmersiveSystemBars(activity)
                         },
+                        onDownload = { requestDownload(activeMedia) },
                         onBack = { closeViewer() }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    hwAcceleration: Boolean,
+    downloadFormatPref: DownloadFormatPref,
+    refreshTick: Int,
+    onToggleHwAcceleration: (Boolean) -> Unit,
+    onSelectDownloadFormatPref: (DownloadFormatPref) -> Unit,
+    onClearCache: () -> Unit,
+    onClearHistory: () -> Unit,
+    onOpenHistoryItem: (HistoryRecord) -> Unit,
+    onDeleteDownloadedFile: (DownloadedFileEntry) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+
+    val cacheBytes = remember(refreshTick) { AppStorageManager.getCacheSizeBytes(context) }
+    val historyList = remember(refreshTick) { AppStorageManager.getHistory(context) }
+    val downloadedList = remember(refreshTick) { AppStorageManager.listDownloadedFiles(context) }
+    val defaultDirPath = remember { AppStorageManager.getDefaultDownloadDir(context).absolutePath }
+    val dateFmt = remember { SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()) }
+
+    LazyColumn(
+        contentPadding = PaddingValues(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = modifier
+    ) {
+        item(key = "settings_header") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurfaceElevated)
+                    .border(1.dp, BbBorderBright)
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = BbOrange,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "SETTINGS // SYSTEM",
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "AltHub v${BuildConfig.VERSION_NAME}",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
+                CubicActionButton(
+                    text = "CLOSE",
+                    primary = true,
+                    onClick = onClose
+                )
+            }
+        }
+
+        item(key = "settings_github") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurface)
+                    .border(1.dp, BbBorder)
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "DEVELOPER // ALTERIZA",
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = null,
+                            tint = BbOrange,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                    Text(
+                        text = "github.com/alteriza",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
+                CubicActionButton(
+                    text = "GITHUB",
+                    icon = Icons.Default.NorthEast,
+                    primary = true,
+                    onClick = {
+                        runCatching { uriHandler.openUri(NativeCore.getDeveloperProfileUrl()) }
+                    }
+                )
+            }
+        }
+
+        item(key = "settings_hw_accel") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurface)
+                    .border(1.dp, BbBorder)
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "HW ACCELERATION",
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = if (hwAcceleration) "Hardware video decoding active" else "Software layer fallback active",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
+                CubicActionButton(
+                    text = if (hwAcceleration) "ON" else "OFF",
+                    primary = hwAcceleration,
+                    onClick = { onToggleHwAcceleration(!hwAcceleration) }
+                )
+            }
+        }
+
+        item(key = "settings_cache") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurface)
+                    .border(1.dp, BbBorder)
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "CACHE STORAGE",
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = "Used: ${formatBytes(cacheBytes)}",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
+                CubicActionButton(
+                    text = "CLEAR CACHE",
+                    primary = false,
+                    onClick = onClearCache
+                )
+            }
+        }
+
+        item(key = "settings_download_pref") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurface)
+                    .border(1.dp, BbBorder)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "DOWNLOAD FORMAT & STORAGE",
+                    color = BbWhite,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp
+                )
+                Text(
+                    text = "Default Folder: $defaultDirPath",
+                    color = BbMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(DownloadFormatPref.entries) { pref ->
+                        CubicFilterChip(
+                            label = pref.label,
+                            selected = downloadFormatPref == pref,
+                            onClick = { onSelectDownloadFormatPref(pref) }
+                        )
+                    }
+                }
+            }
+        }
+
+        item(key = "settings_downloads_header") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurfaceElevated)
+                    .border(1.dp, BbBorder)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = null,
+                    tint = BbOrange,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "DOWNLOADED FILES (${downloadedList.size})",
+                    color = BbWhite,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        if (downloadedList.isEmpty()) {
+            item(key = "settings_downloads_empty") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(BbSurface)
+                        .border(1.dp, BbBorder)
+                        .padding(14.dp)
+                ) {
+                    Text(
+                        text = "Belum ada file yang di-download.",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        } else {
+            items(downloadedList, key = { "dl_${it.path}" }) { entry ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(BbSurface)
+                        .border(1.dp, BbBorder)
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = entry.name,
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${if (entry.isVideo) "VIDEO" else "PHOTO"} • ${formatBytes(entry.sizeBytes)}",
+                            color = BbMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+                    }
+                    CubicSquareIconButton(
+                        icon = Icons.Default.Delete,
+                        active = false,
+                        onClick = { onDeleteDownloadedFile(entry) }
+                    )
+                }
+            }
+        }
+
+        item(key = "settings_history_header") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(BbSurfaceElevated)
+                    .border(1.dp, BbBorder)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.History,
+                    contentDescription = null,
+                    tint = BbOrange,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "WATCH & VIEW HISTORY (${historyList.size})",
+                    color = BbWhite,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                if (historyList.isNotEmpty()) {
+                    Text(
+                        text = "CLEAR",
+                        color = BbOrange,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        modifier = Modifier.clickable(onClick = onClearHistory)
+                    )
+                }
+            }
+        }
+
+        if (historyList.isEmpty()) {
+            item(key = "settings_history_empty") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(BbSurface)
+                        .border(1.dp, BbBorder)
+                        .padding(14.dp)
+                ) {
+                    Text(
+                        text = "Riwayat tontonan & foto masih kosong.",
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        } else {
+            items(historyList, key = { "hist_${it.id}_${it.timestampMs}" }) { rec ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(BbSurface)
+                        .border(1.dp, BbBorder)
+                        .clickable { onOpenHistoryItem(rec) }
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = rec.title.uppercase(),
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${rec.kind.name} • ${rec.sourceType.name} • ${dateFmt.format(Date(rec.timestampMs))}",
+                            color = BbMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.NorthEast,
+                        contentDescription = null,
+                        tint = BbWhite,
+                        modifier = Modifier.size(15.dp)
                     )
                 }
             }
@@ -947,7 +1611,8 @@ private fun TechnicalGridBackdrop() {
 
 @Composable
 private fun SocialTopBar(
-    CORNXUnlocked: Boolean,
+    rnxUnlocked: Boolean,
+    settingsOpen: Boolean,
     searchExpanded: Boolean,
     searchQuery: String,
     onLogoTap: () -> Unit,
@@ -968,7 +1633,7 @@ private fun SocialTopBar(
             Box(
                 modifier = Modifier
                     .size(28.dp)
-                    .background(BbWhite)
+                    .background(if (settingsOpen) BbOrange else BbWhite)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -979,7 +1644,7 @@ private fun SocialTopBar(
                 Box(
                     modifier = Modifier
                         .size(12.dp)
-                        .background(if (CORNXUnlocked) BbOrange else BbBlack)
+                        .background(if (rnxUnlocked && !settingsOpen) BbOrange else BbBlack)
                 )
             }
             Spacer(Modifier.width(10.dp))
@@ -1230,6 +1895,7 @@ private fun CubicFilterChip(
 private fun SocialStreamPostCard(
     item: RemoteMediaItem,
     onOpen: () -> Unit,
+    onDownload: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1403,7 +2069,7 @@ private fun SocialStreamPostCard(
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = if (item.sizeBytes > 0L) {
-                        "${item.fileName} • ${item.sizeBytes / 1024} KB"
+                        "${item.fileName} • ${formatBytes(item.sizeBytes)}"
                     } else {
                         item.fileName
                     },
@@ -1414,7 +2080,13 @@ private fun SocialStreamPostCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
+            CubicSquareIconButton(
+                icon = Icons.Default.Download,
+                active = false,
+                onClick = onDownload
+            )
+            Spacer(Modifier.width(8.dp))
             CubicActionButton(
                 text = if (item.kind == MediaKind.VIDEO) "PLAY" else "VIEW",
                 icon = Icons.Default.NorthEast,
@@ -1429,7 +2101,8 @@ private fun SocialStreamPostCard(
 private fun VideoStreamCard(
     indexNumber: Int,
     item: RemoteMediaItem,
-    onWatch: () -> Unit
+    onWatch: () -> Unit,
+    onDownload: () -> Unit
 ) {
     val context = LocalContext.current
     var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
@@ -1541,7 +2214,13 @@ private fun VideoStreamCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
+            CubicSquareIconButton(
+                icon = Icons.Default.Download,
+                active = false,
+                onClick = onDownload
+            )
+            Spacer(Modifier.width(8.dp))
             CubicActionButton(
                 text = "WATCH",
                 icon = Icons.Default.NorthEast,
@@ -1654,18 +2333,19 @@ private fun SocialAnnouncementCard(
 @Composable
 private fun CubicBottomNavBar(
     current: NavDestination,
-    CORNXUnlocked: Boolean,
+    settingsOpen: Boolean,
+    rnxUnlocked: Boolean,
     videoCount: Int,
     photoCount: Int,
     infoCount: Int,
-    CORNXCount: Int,
+    rnxCount: Int,
     onSelect: (NavDestination) -> Unit
 ) {
-    val destinations = remember(CORNXUnlocked) {
-        if (CORNXUnlocked) {
+    val destinations = remember(rnxUnlocked) {
+        if (rnxUnlocked) {
             NavDestination.entries
         } else {
-            NavDestination.entries.filter { it != NavDestination.CORNX }
+            NavDestination.entries.filter { it != NavDestination.RNX }
         }
     }
 
@@ -1677,13 +2357,13 @@ private fun CubicBottomNavBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         destinations.forEach { dest ->
-            val selected = current == dest
+            val selected = !settingsOpen && current == dest
             val badge = when (dest) {
                 NavDestination.FEED -> ""
                 NavDestination.VIDEOS -> " [$videoCount]"
                 NavDestination.PHOTOS -> " [$photoCount]"
                 NavDestination.INFO -> " [$infoCount]"
-                NavDestination.CORNX -> " [$CORNXCount]"
+                NavDestination.RNX -> " [$rnxCount]"
             }
             Box(
                 modifier = Modifier
@@ -1694,7 +2374,7 @@ private fun CubicBottomNavBar(
                         1.dp,
                         when {
                             selected -> BbWhite
-                            dest == NavDestination.CORNX -> BbOrange
+                            dest == NavDestination.RNX -> BbOrange
                             else -> BbBorder
                         }
                     )
@@ -1711,7 +2391,7 @@ private fun CubicBottomNavBar(
                             contentDescription = dest.label,
                             tint = when {
                                 selected -> BbBlack
-                                dest == NavDestination.CORNX -> BbOrange
+                                dest == NavDestination.RNX -> BbOrange
                                 else -> BbMuted
                             },
                             modifier = Modifier.size(15.dp)
@@ -1730,7 +2410,7 @@ private fun CubicBottomNavBar(
                         text = "${dest.label}$badge",
                         color = when {
                             selected -> BbBlack
-                            dest == NavDestination.CORNX -> BbOrange
+                            dest == NavDestination.RNX -> BbOrange
                             else -> BbMuted
                         },
                         fontFamily = FontFamily.Monospace,
@@ -1864,24 +2544,51 @@ private fun EmptyFeedBox(
 @Composable
 private fun CubicStreamingVideoPlayer(
     item: RemoteMediaItem,
+    hwAcceleration: Boolean,
     onOrientationResolved: (Boolean) -> Unit,
+    onToggleOrientation: () -> Unit,
+    onDownload: () -> Unit,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    val audioManager = remember(context) {
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
+
     val streamUrl = remember(item.id) { LocalStreamServer.getStreamUrl(item) }
     var videoView by remember { mutableStateOf<VideoView?>(null) }
+    var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableIntStateOf(0) }
     var durationMs by remember { mutableIntStateOf(1) }
     var ready by remember { mutableStateOf(false) }
     var hasError by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
+    var controlsLocked by remember { mutableStateOf(false) }
     var interactionTick by remember { mutableIntStateOf(0) }
     var isSeeking by remember { mutableStateOf(false) }
 
+    var isMuted by remember { mutableStateOf(false) }
+    var isLooping by remember { mutableStateOf(false) }
+    val speeds = remember { listOf(0.5f, 1.0f, 1.25f, 1.5f, 2.0f) }
+    var speedIndex by remember { mutableIntStateOf(1) }
+    var resizeMode by remember { mutableStateOf(VideoResizeMode.FIT) }
+
+    var gestureBadge by remember { mutableStateOf<String?>(null) }
+    var brightnessLevel by remember { mutableFloatStateOf(0.5f) }
+
     LaunchedEffect(controlsVisible, interactionTick, isPlaying, isSeeking) {
         if (controlsVisible && isPlaying && !isSeeking) {
-            delay(3000L)
+            delay(3200L)
             controlsVisible = false
+        }
+    }
+
+    LaunchedEffect(gestureBadge) {
+        if (gestureBadge != null) {
+            delay(900L)
+            gestureBadge = null
         }
     }
 
@@ -1890,7 +2597,7 @@ private fun CubicStreamingVideoPlayer(
             val vv = videoView
             if (vv != null && ready && !isSeeking) {
                 positionMs = vv.currentPosition.coerceAtLeast(0)
-                if (positionMs >= durationMs - 400 && !vv.isPlaying) {
+                if (positionMs >= durationMs - 400 && !vv.isPlaying && !isLooping) {
                     isPlaying = false
                 }
             }
@@ -1898,17 +2605,64 @@ private fun CubicStreamingVideoPlayer(
         }
     }
 
+    val scaleMod = when (resizeMode) {
+        VideoResizeMode.FIT -> Modifier.fillMaxSize()
+        VideoResizeMode.FILL -> Modifier.fillMaxSize().graphicsLayer(scaleX = 1.28f, scaleY = 1.28f)
+        VideoResizeMode.STRETCH -> Modifier.fillMaxSize().graphicsLayer(scaleX = 1.15f, scaleY = 0.92f)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BbBlack)
-            .pointerInput(Unit) {
+            .pointerInput(controlsLocked) {
                 detectTapGestures(
                     onTap = {
                         controlsVisible = !controlsVisible
                         if (controlsVisible) interactionTick++
+                    },
+                    onDoubleTap = { offset ->
+                        if (controlsLocked) return@detectTapGestures
+                        val vv = videoView ?: return@detectTapGestures
+                        val half = size.width / 2f
+                        if (offset.x < half) {
+                            val next = (vv.currentPosition - 10_000).coerceAtLeast(0)
+                            vv.seekTo(next)
+                            positionMs = next
+                            gestureBadge = "-10s"
+                        } else {
+                            val next = (vv.currentPosition + 10_000).coerceAtMost(durationMs)
+                            vv.seekTo(next)
+                            positionMs = next
+                            gestureBadge = "+10s"
+                        }
+                        interactionTick++
                     }
                 )
+            }
+            .pointerInput(controlsLocked) {
+                detectDragGestures { change, dragAmount ->
+                    if (controlsLocked) return@detectDragGestures
+                    val deltaY = -dragAmount.y / size.height.coerceAtLeast(1)
+                    if (change.position.x < size.width / 2f) {
+                        brightnessLevel = (brightnessLevel + deltaY).coerceIn(0.05f, 1f)
+                        activity?.window?.let { win ->
+                            val lp = win.attributes
+                            lp.screenBrightness = brightnessLevel
+                            win.attributes = lp
+                        }
+                        gestureBadge = "BRIGHTNESS ${(brightnessLevel * 100).toInt()}%"
+                    } else {
+                        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                        val curVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        val step = if (deltaY > 0.02f) 1 else if (deltaY < -0.02f) -1 else 0
+                        if (step != 0) {
+                            val nextVol = (curVol + step).coerceIn(0, maxVol)
+                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, nextVol, 0)
+                            gestureBadge = "VOLUME ${(nextVol * 100) / maxVol}%"
+                        }
+                    }
+                }
             }
     ) {
         AndroidView(
@@ -1924,11 +2678,17 @@ private fun CubicStreamingVideoPlayer(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             Gravity.CENTER
                         )
+                        setLayerType(
+                            if (hwAcceleration) View.LAYER_TYPE_HARDWARE else View.LAYER_TYPE_SOFTWARE,
+                            null
+                        )
                         setVideoURI(Uri.parse(streamUrl))
                         setOnPreparedListener { mp ->
+                            mediaPlayerRef = mp
                             durationMs = mp.duration.coerceAtLeast(1)
                             ready = true
-                            mp.isLooping = false
+                            mp.isLooping = isLooping
+                            if (isMuted) mp.setVolume(0f, 0f) else mp.setVolume(1f, 1f)
                             if (mp.videoWidth > 0 && mp.videoHeight > 0) {
                                 onOrientationResolved(mp.videoWidth > mp.videoHeight)
                             }
@@ -1937,9 +2697,11 @@ private fun CubicStreamingVideoPlayer(
                             interactionTick++
                         }
                         setOnCompletionListener {
-                            isPlaying = false
-                            positionMs = durationMs
-                            controlsVisible = true
+                            if (!isLooping) {
+                                isPlaying = false
+                                positionMs = durationMs
+                                controlsVisible = true
+                            }
                         }
                         setOnErrorListener { _, _, _ ->
                             hasError = true
@@ -1951,7 +2713,7 @@ private fun CubicStreamingVideoPlayer(
                     addView(vv)
                 }
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = scaleMod
         )
 
         if (!ready && !hasError) {
@@ -1960,6 +2722,25 @@ private fun CubicStreamingVideoPlayer(
                     color = BbOrange,
                     strokeWidth = 2.dp,
                     modifier = Modifier.size(30.dp)
+                )
+            }
+        }
+
+        val badge = gestureBadge
+        if (badge != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(BbBlack.copy(alpha = 0.85f))
+                    .border(1.dp, BbOrange)
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = badge,
+                    color = BbWhite,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
                 )
             }
         }
@@ -1999,126 +2780,222 @@ private fun CubicStreamingVideoPlayer(
                     .fillMaxSize()
                     .windowInsetsPadding(WindowInsets.safeDrawing)
             ) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                        .background(BbBlack.copy(alpha = 0.85f))
-                        .border(1.dp, BbBorder)
-                        .padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CubicActionButton(
-                        text = "BACK",
-                        icon = Icons.Default.ArrowBack,
-                        primary = true,
-                        onClick = onBack
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = item.title.uppercase(),
-                        color = BbWhite,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                        .background(BbBlack.copy(alpha = 0.88f))
-                        .border(1.dp, BbBorder)
-                        .padding(12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                if (controlsLocked) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(14.dp)
                     ) {
-                        CubicSquareIconButton(
-                            icon = Icons.Default.Replay10,
-                            active = false,
-                            onClick = {
-                                val vv = videoView ?: return@CubicSquareIconButton
-                                val next = (vv.currentPosition - 10_000).coerceAtLeast(0)
-                                vv.seekTo(next)
-                                positionMs = next
-                                interactionTick++
-                            }
-                        )
                         CubicActionButton(
-                            text = if (isPlaying) "PAUSE" else "PLAY",
-                            icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            text = "UNLOCK",
+                            icon = Icons.Default.LockOpen,
                             primary = true,
                             onClick = {
-                                val vv = videoView ?: return@CubicActionButton
-                                if (vv.isPlaying) {
-                                    vv.pause()
-                                    isPlaying = false
-                                } else {
-                                    vv.start()
-                                    isPlaying = true
-                                }
-                                interactionTick++
-                            }
-                        )
-                        CubicSquareIconButton(
-                            icon = Icons.Default.Forward10,
-                            active = false,
-                            onClick = {
-                                val vv = videoView ?: return@CubicSquareIconButton
-                                val next = (vv.currentPosition + 10_000).coerceAtMost(durationMs)
-                                vv.seekTo(next)
-                                positionMs = next
+                                controlsLocked = false
                                 interactionTick++
                             }
                         )
                     }
-                    Spacer(Modifier.height(6.dp))
+                } else {
                     Row(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                            .background(BbBlack.copy(alpha = 0.85f))
+                            .border(1.dp, BbBorder)
+                            .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        CubicActionButton(
+                            text = "BACK",
+                            icon = Icons.Default.ArrowBack,
+                            primary = true,
+                            onClick = onBack
+                        )
                         Text(
-                            text = formatDuration(positionMs),
+                            text = item.title.uppercase(),
                             color = BbWhite,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
-                        Slider(
-                            value = positionMs.toFloat().coerceIn(0f, durationMs.toFloat()),
-                            onValueChange = { v ->
-                                isSeeking = true
-                                positionMs = v.toInt()
-                                videoView?.seekTo(positionMs)
-                            },
-                            onValueChangeFinished = {
-                                isSeeking = false
+                        CubicSquareIconButton(
+                            icon = Icons.Default.ScreenRotation,
+                            active = false,
+                            onClick = {
+                                onToggleOrientation()
                                 interactionTick++
-                            },
-                            valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 12.dp),
-                            colors = SliderDefaults.colors(
-                                thumbColor = BbOrange,
-                                activeTrackColor = BbWhite,
-                                inactiveTrackColor = BbBorderBright
+                            }
+                        )
+                        CubicSquareIconButton(
+                            icon = Icons.Default.AspectRatio,
+                            active = resizeMode != VideoResizeMode.FIT,
+                            onClick = {
+                                val modes = VideoResizeMode.entries
+                                resizeMode = modes[(resizeMode.ordinal + 1) % modes.size]
+                                gestureBadge = "ASPECT: ${resizeMode.label}"
+                                interactionTick++
+                            }
+                        )
+                        CubicSquareIconButton(
+                            icon = Icons.Default.Lock,
+                            active = false,
+                            onClick = {
+                                controlsLocked = true
+                            }
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                            .background(BbBlack.copy(alpha = 0.88f))
+                            .border(1.dp, BbBorder)
+                            .padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CubicSquareIconButton(
+                                icon = Icons.Default.Replay10,
+                                active = false,
+                                onClick = {
+                                    val vv = videoView ?: return@CubicSquareIconButton
+                                    val next = (vv.currentPosition - 10_000).coerceAtLeast(0)
+                                    vv.seekTo(next)
+                                    positionMs = next
+                                    interactionTick++
+                                }
                             )
-                        )
-                        Text(
-                            text = formatDuration(durationMs),
-                            color = BbWhite,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        )
+                            CubicActionButton(
+                                text = if (isPlaying) "PAUSE" else "PLAY",
+                                icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                primary = true,
+                                onClick = {
+                                    val vv = videoView ?: return@CubicActionButton
+                                    if (vv.isPlaying) {
+                                        vv.pause()
+                                        isPlaying = false
+                                    } else {
+                                        vv.start()
+                                        isPlaying = true
+                                    }
+                                    interactionTick++
+                                }
+                            )
+                            CubicSquareIconButton(
+                                icon = Icons.Default.Forward10,
+                                active = false,
+                                onClick = {
+                                    val vv = videoView ?: return@CubicSquareIconButton
+                                    val next = (vv.currentPosition + 10_000).coerceAtMost(durationMs)
+                                    vv.seekTo(next)
+                                    positionMs = next
+                                    interactionTick++
+                                }
+                            )
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = formatDuration(positionMs),
+                                color = BbWhite,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                            Slider(
+                                value = positionMs.toFloat().coerceIn(0f, durationMs.toFloat()),
+                                onValueChange = { v ->
+                                    isSeeking = true
+                                    positionMs = v.toInt()
+                                    videoView?.seekTo(positionMs)
+                                },
+                                onValueChangeFinished = {
+                                    isSeeking = false
+                                    interactionTick++
+                                },
+                                valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 12.dp),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = BbOrange,
+                                    activeTrackColor = BbWhite,
+                                    inactiveTrackColor = BbBorderBright
+                                )
+                            )
+                            Text(
+                                text = formatDuration(durationMs),
+                                color = BbWhite,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CubicSquareIconButton(
+                                icon = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                active = isMuted,
+                                onClick = {
+                                    isMuted = !isMuted
+                                    val vol = if (isMuted) 0f else 1f
+                                    runCatching { mediaPlayerRef?.setVolume(vol, vol) }
+                                    interactionTick++
+                                }
+                            )
+                            CubicActionButton(
+                                text = "${speeds[speedIndex]}x",
+                                icon = Icons.Default.Speed,
+                                primary = speedIndex != 1,
+                                onClick = {
+                                    speedIndex = (speedIndex + 1) % speeds.size
+                                    val spd = speeds[speedIndex]
+                                    runCatching {
+                                        mediaPlayerRef?.let { mp ->
+                                            mp.playbackParams = PlaybackParams().setSpeed(spd)
+                                        }
+                                    }
+                                    interactionTick++
+                                }
+                            )
+                            CubicSquareIconButton(
+                                icon = Icons.Default.Loop,
+                                active = isLooping,
+                                onClick = {
+                                    isLooping = !isLooping
+                                    runCatching { mediaPlayerRef?.isLooping = isLooping }
+                                    gestureBadge = if (isLooping) "LOOP ON" else "LOOP OFF"
+                                    interactionTick++
+                                }
+                            )
+                            Spacer(Modifier.weight(1f))
+                            CubicActionButton(
+                                text = "SAVE",
+                                icon = Icons.Default.Download,
+                                primary = false,
+                                onClick = {
+                                    interactionTick++
+                                    onDownload()
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -2130,6 +3007,7 @@ private fun CubicStreamingVideoPlayer(
 private fun CubicStreamingImageViewer(
     item: RemoteMediaItem,
     onOrientationResolved: (Boolean) -> Unit,
+    onDownload: () -> Unit,
     onBack: () -> Unit
 ) {
     var bitmap by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
@@ -2255,88 +3133,67 @@ private fun CubicStreamingImageViewer(
             visible = controlsVisible,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
         ) {
-            Box(
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .background(BbBlack.copy(alpha = 0.85f))
+                    .border(1.dp, BbBorder)
+                    .padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                        .background(BbBlack.copy(alpha = 0.85f))
-                        .border(1.dp, BbBorder)
-                        .padding(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CubicActionButton(
-                        text = "BACK",
-                        icon = Icons.Default.ArrowBack,
-                        primary = true,
-                        onClick = onBack
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        text = item.title.uppercase(),
-                        color = BbWhite,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (scale > 1f) {
-                        CubicActionButton(
-                            text = "1:1",
-                            primary = false,
-                            onClick = {
-                                scale = 1f
-                                offsetX = 0f
-                                offsetY = 0f
-                                interactionTick++
-                            }
-                        )
+                CubicActionButton(
+                    text = "BACK",
+                    icon = Icons.Default.ArrowBack,
+                    primary = true,
+                    onClick = onBack
+                )
+                Text(
+                    text = item.title.uppercase(),
+                    color = BbWhite,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                CubicActionButton(
+                    text = "SAVE",
+                    icon = Icons.Default.Download,
+                    primary = false,
+                    onClick = {
+                        interactionTick++
+                        onDownload()
                     }
-                }
-
-                if (activeBmp != null) {
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .padding(12.dp)
-                            .background(BbBlack.copy(alpha = 0.85f))
-                            .border(1.dp, BbBorder)
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "${activeBmp.width}x${activeBmp.height} PX",
-                            color = BbMuted,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp
-                        )
-                        Text(
-                            text = "ZOOM ${(scale * 100).toInt()}%",
-                            color = BbWhite,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp
-                        )
-                    }
-                }
+                )
             }
         }
     }
 }
 
 private fun formatDuration(ms: Int): String {
-    val total = (ms / 1000).coerceAtLeast(0)
-    val m = total / 60
-    val s = total % 60
-    return "%02d:%02d".format(m, s)
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    val min = totalSec / 60
+    val sec = totalSec % 60
+    return "%02d:%02d".format(min, sec)
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1.0 -> "%.2f GB".format(gb)
+        mb >= 1.0 -> "%.2f MB".format(mb)
+        kb >= 1.0 -> "%.1f KB".format(kb)
+        else -> "$bytes B"
+    }
 }

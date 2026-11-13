@@ -14,15 +14,20 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 object AutoDiscoveryRepository {
     private const val MAX_THUMB_DIM = 720
-    private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "gif")
+    private val VIDEO_EXTS = setOf("vcv", "mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp", "ts")
+    private val IMAGE_EXTS = setOf("icv", "png", "jpg", "jpeg", "webp", "gif", "bmp")
 
     private val memoryThumbs = ConcurrentHashMap<String, Bitmap>()
+
+    @Volatile
+    private var cachedGofileToken: String? = null
 
     private data class GitHubLocation(
         val owner: String,
@@ -32,6 +37,10 @@ object AutoDiscoveryRepository {
     )
 
     fun getCachedThumbnail(itemId: String): Bitmap? = memoryThumbs[itemId]
+
+    fun clearMemoryCache() {
+        memoryThumbs.clear()
+    }
 
     suspend fun discoverAll(): DiscoveryResult =
         discoverFromCdn(
@@ -72,8 +81,14 @@ object AutoDiscoveryRepository {
 
         for (src in sourceUrls) {
             activeSources.add(src)
-            when {
-                isGoogleDriveUrl(src) -> {
+            val hostJson = NativeCore.resolveHostEndpoint(src)
+            val hostObj = runCatching { JSONObject(hostJson) }.getOrNull()
+            val hostType = hostObj?.optString("host_type", "direct") ?: "direct"
+            val resolvedUrl = hostObj?.optString("resolved_url", src)?.ifBlank { src } ?: src
+            val fileId = hostObj?.optString("file_id", "") ?: ""
+
+            when (hostType) {
+                "gdrive_folder" -> {
                     val folderId = extractDriveId(src)
                     if (folderId != null) {
                         runCatching {
@@ -83,32 +98,71 @@ object AutoDiscoveryRepository {
                         }
                     }
                 }
-                isGitHubUrl(src) -> {
-                    val loc = parseGitHubUrl(src)
-                    if (loc != null) {
+                "gdrive_file" -> {
+                    val fid = extractDriveId(src)
+                    if (fid != null) {
                         runCatching {
-                            discoverGitHubRepo(loc, mediaMap, postMap)
+                            discoverSingleDriveFile(fid, mediaMap)
                         }.onFailure {
-                            errors.add("GitHub (${loc.owner}/${loc.repo}): ${it.message}")
+                            errors.add("DriveFile ($fid): ${it.message}")
                         }
                     }
                 }
-                src.endsWith(".vcv", true) || src.endsWith(".icv", true) -> {
-                    val name = src.substringAfterLast('/').substringBefore('?')
-                    val isVideo = name.endsWith(".vcv", true)
-                    val baseDir = src.substringBeforeLast('/')
-                    val thumb = if (isVideo) "$baseDir/.thumbnail/$name.png" else null
-                    mediaMap[src] = RemoteMediaItem(
-                        id = sha256(src),
-                        title = formatTitle(name),
-                        fileName = name,
-                        kind = if (isVideo) MediaKind.VIDEO else MediaKind.IMAGE,
-                        sourceType = SourceType.GITHUB,
-                        mediaUrl = src,
-                        thumbnailUrl = thumb,
-                        sizeBytes = 0L,
-                        folderPath = "/"
-                    )
+                "github" -> {
+                    val loc = parseGitHubUrl(src)
+                    if (loc != null) {
+                        runCatching {
+                            discoverGitHubSource(src, loc, mediaMap, postMap)
+                        }.onFailure {
+                            errors.add("GitHub (${loc.owner}/${loc.repo}): ${it.message}")
+                        }
+                    } else {
+                        runCatching {
+                            discoverDirectOrWebFile(src, SourceType.GITHUB, mediaMap)
+                        }
+                    }
+                }
+                "pixeldrain" -> {
+                    runCatching {
+                        discoverPixeldrainFile(fileId, resolvedUrl, mediaMap)
+                    }.onFailure {
+                        errors.add("Pixeldrain ($fileId): ${it.message}")
+                    }
+                }
+                "pixeldrain_list" -> {
+                    runCatching {
+                        discoverPixeldrainList(resolvedUrl, mediaMap)
+                    }.onFailure {
+                        errors.add("PixeldrainList ($fileId): ${it.message}")
+                    }
+                }
+                "gofile" -> {
+                    runCatching {
+                        discoverGofileContent(resolvedUrl, mediaMap)
+                    }.onFailure {
+                        errors.add("Gofile ($fileId): ${it.message}")
+                    }
+                }
+                "acefile" -> {
+                    runCatching {
+                        discoverAcefilePage(src, fileId, mediaMap)
+                    }.onFailure {
+                        errors.add("Acefile ($fileId): ${it.message}")
+                    }
+                }
+                "filedom" -> {
+                    runCatching {
+                        discoverDirectOrWebFile(src, SourceType.FILEDOM, mediaMap)
+                    }.onFailure {
+                        errors.add("Filedom: ${it.message}")
+                    }
+                }
+                else -> {
+                    runCatching {
+                        discoverDirectOrWebFile(src, SourceType.DIRECT, mediaMap)
+                    }.onFailure {
+                        errors.add("Direct: ${it.message}")
+                    }
                 }
             }
         }
@@ -136,14 +190,338 @@ object AutoDiscoveryRepository {
         )
     }
 
-    private fun isGitHubUrl(url: String): Boolean {
-        val l = url.lowercase()
-        return l.contains("github.com/") || l.contains("raw.githubusercontent.com/")
+    private fun classifyMediaByName(fileName: String, contentType: String = ""): Pair<MediaKind, Boolean>? {
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        val ct = contentType.lowercase()
+        return when {
+            ext == "vcv" -> MediaKind.VIDEO to true
+            ext == "icv" -> MediaKind.IMAGE to true
+            ext in VIDEO_EXTS -> MediaKind.VIDEO to false
+            ext in IMAGE_EXTS -> MediaKind.IMAGE to false
+            ct.startsWith("video/") -> MediaKind.VIDEO to false
+            ct.startsWith("image/") -> MediaKind.IMAGE to false
+            else -> null
+        }
     }
 
-    private fun isGoogleDriveUrl(url: String): Boolean {
-        val l = url.lowercase()
-        return l.contains("drive.google.com/") || l.contains("docs.google.com/")
+    private fun discoverPixeldrainFile(
+        fileId: String,
+        streamUrl: String,
+        mediaMap: MutableMap<String, RemoteMediaItem>
+    ) {
+        val infoUrl = "$streamUrl/info"
+        val infoJson = httpGetText(infoUrl, isGitHubApi = false)
+        val obj = infoJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val name = obj?.optString("name", "")?.ifBlank { null } ?: "$fileId.mp4"
+        val size = obj?.optLong("size", 0L) ?: 0L
+        val mime = obj?.optString("mime_type", "") ?: ""
+        val classified = classifyMediaByName(name, mime) ?: (MediaKind.VIDEO to false)
+        val itemKey = sha256(streamUrl)
+        val thumb = if (classified.first == MediaKind.VIDEO) "$streamUrl/thumbnail" else null
+        mediaMap[itemKey] = RemoteMediaItem(
+            id = itemKey,
+            title = formatTitle(name),
+            fileName = name,
+            kind = classified.first,
+            sourceType = SourceType.PIXELDRAIN,
+            mediaUrl = streamUrl,
+            thumbnailUrl = thumb,
+            sizeBytes = size,
+            folderPath = "/pixeldrain",
+            isContainer = classified.second
+        )
+    }
+
+    private fun discoverPixeldrainList(
+        listApiUrl: String,
+        mediaMap: MutableMap<String, RemoteMediaItem>
+    ) {
+        val jsonText = httpGetText(listApiUrl, isGitHubApi = false) ?: return
+        val root = JSONObject(jsonText)
+        val files = root.optJSONArray("files") ?: return
+        for (i in 0 until files.length()) {
+            val f = files.optJSONObject(i) ?: continue
+            val fid = f.optString("id")
+            val name = f.optString("name").ifBlank { "$fid.mp4" }
+            val size = f.optLong("size", 0L)
+            val mime = f.optString("mime_type", "")
+            val classified = classifyMediaByName(name, mime) ?: continue
+            val streamUrl = "https://pixeldrain.com/api/file/$fid"
+            val itemKey = sha256(streamUrl)
+            val thumb = if (classified.first == MediaKind.VIDEO) "$streamUrl/thumbnail" else null
+            mediaMap[itemKey] = RemoteMediaItem(
+                id = itemKey,
+                title = formatTitle(name),
+                fileName = name,
+                kind = classified.first,
+                sourceType = SourceType.PIXELDRAIN,
+                mediaUrl = streamUrl,
+                thumbnailUrl = thumb,
+                sizeBytes = size,
+                folderPath = "/pixeldrain",
+                isContainer = classified.second
+            )
+        }
+    }
+
+    private fun ensureGofileToken(): String? {
+        cachedGofileToken?.let { return it }
+        val endpoint = NativeCore.getGofileTokenEndpoint()
+        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 20_000
+            setRequestProperty("User-Agent", NativeCore.getUserAgent())
+            doOutput = true
+        }
+        return try {
+            conn.outputStream.use { it.write(ByteArray(0)) }
+            if (conn.responseCode in 200..299) {
+                val resp = conn.inputStream.bufferedReader().readText()
+                val token = JSONObject(resp).optJSONObject("data")?.optString("token", "")
+                if (!token.isNullOrBlank()) {
+                    cachedGofileToken = token
+                    token
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun discoverGofileContent(
+        apiUrl: String,
+        mediaMap: MutableMap<String, RemoteMediaItem>
+    ) {
+        val token = ensureGofileToken() ?: return
+        val headers = mapOf("Authorization" to "Bearer $token")
+        val jsonText = httpGetText(apiUrl, isGitHubApi = false, extraHeaders = headers) ?: return
+        val root = JSONObject(jsonText)
+        val data = root.optJSONObject("data") ?: return
+        val children = data.optJSONObject("children") ?: return
+        val keys = children.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val itemObj = children.optJSONObject(k) ?: continue
+            if (itemObj.optString("type") != "file") continue
+            val name = itemObj.optString("name")
+            val link = itemObj.optString("link")
+            val size = itemObj.optLong("size", 0L)
+            val mime = itemObj.optString("mimetype", "")
+            if (link.isBlank()) continue
+            val classified = classifyMediaByName(name, mime) ?: continue
+            val itemKey = sha256(link)
+            mediaMap[itemKey] = RemoteMediaItem(
+                id = itemKey,
+                title = formatTitle(name),
+                fileName = name,
+                kind = classified.first,
+                sourceType = SourceType.GOFILE,
+                mediaUrl = link,
+                thumbnailUrl = null,
+                sizeBytes = size,
+                folderPath = "/gofile",
+                isContainer = classified.second,
+                headers = headers
+            )
+        }
+    }
+
+    private fun discoverAcefilePage(
+        pageUrl: String,
+        fileId: String,
+        mediaMap: MutableMap<String, RemoteMediaItem>
+    ) {
+        val targetUrls = buildList {
+            if (fileId.isNotEmpty() && pageUrl.contains("/f/")) {
+                add("https://acefile.co/player/$fileId")
+            }
+            add(pageUrl)
+        }
+        for (u in targetUrls) {
+            val html = httpGetText(u, isGitHubApi = false) ?: continue
+            val direct = extractMediaUrlFromHtml(html, u)
+            if (direct != null) {
+                val titleMatch = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE).find(html)
+                val rawTitle = titleMatch?.groupValues?.get(1)
+                    ?.replace("Acefile", "", ignoreCase = true)
+                    ?.replace("-", " ")
+                    ?.trim()
+                    .orEmpty()
+                val slugName = pageUrl.substringAfterLast('/').substringBefore('?')
+                val finalName = when {
+                    slugName.contains('.') -> decodeUrlName(slugName)
+                    rawTitle.isNotBlank() -> "$rawTitle.mp4"
+                    else -> "acefile_${fileId.ifEmpty { "stream" }}.mp4"
+                }
+                val classified = classifyMediaByName(finalName) ?: (MediaKind.VIDEO to false)
+                val itemKey = sha256(direct)
+                mediaMap[itemKey] = RemoteMediaItem(
+                    id = itemKey,
+                    title = formatTitle(finalName),
+                    fileName = finalName,
+                    kind = classified.first,
+                    sourceType = SourceType.ACEFILE,
+                    mediaUrl = direct,
+                    thumbnailUrl = null,
+                    sizeBytes = 0L,
+                    folderPath = "/acefile",
+                    isContainer = classified.second,
+                    headers = mapOf("Referer" to u)
+                )
+                return
+            }
+        }
+    }
+
+    private fun discoverSingleDriveFile(
+        fileId: String,
+        mediaMap: MutableMap<String, RemoteMediaItem>
+    ) {
+        val dlUrl = NativeCore.buildDriveDownloadUrl(fileId)
+        val conn = LocalStreamServer.openRemoteConnection(dlUrl, rangeHeader = "bytes=0-1023")
+        try {
+            val ct = conn.contentType.orEmpty()
+            val disp = conn.getHeaderField("Content-Disposition").orEmpty()
+            val dispName = Regex("""filename\*?=(?:UTF-8''|")?([^";\r\n]+)""", RegexOption.IGNORE_CASE)
+                .find(disp)
+                ?.groupValues
+                ?.get(1)
+                ?.let { decodeUrlName(it.trim('"')) }
+                .orEmpty()
+            val fileName = dispName.ifBlank { "gdrive_$fileId.mp4" }
+            val classified = classifyMediaByName(fileName, ct) ?: (MediaKind.VIDEO to false)
+            val totalSize = conn.getHeaderField("Content-Range")
+                ?.substringAfterLast('/', "")
+                ?.trim()
+                ?.toLongOrNull() ?: 0L
+            val itemKey = "gdrive_$fileId"
+            mediaMap[itemKey] = RemoteMediaItem(
+                id = itemKey,
+                title = formatTitle(fileName),
+                fileName = fileName,
+                kind = classified.first,
+                sourceType = SourceType.GDRIVE,
+                mediaUrl = dlUrl,
+                thumbnailUrl = null,
+                sizeBytes = totalSize,
+                folderPath = "/gdrive",
+                isContainer = classified.second
+            )
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun discoverDirectOrWebFile(
+        rawUrl: String,
+        sourceType: SourceType,
+        mediaMap: MutableMap<String, RemoteMediaItem>
+    ) {
+        val urlWithoutQuery = rawUrl.substringBefore('?').substringBefore('#')
+        val candidateName = decodeUrlName(urlWithoutQuery.substringAfterLast('/'))
+        val directClassified = classifyMediaByName(candidateName)
+
+        if (directClassified != null) {
+            val itemKey = sha256(rawUrl)
+            mediaMap[itemKey] = RemoteMediaItem(
+                id = itemKey,
+                title = formatTitle(candidateName),
+                fileName = candidateName,
+                kind = directClassified.first,
+                sourceType = sourceType,
+                mediaUrl = rawUrl,
+                thumbnailUrl = null,
+                sizeBytes = 0L,
+                folderPath = "/web",
+                isContainer = directClassified.second
+            )
+            return
+        }
+
+        val conn = LocalStreamServer.openRemoteConnection(rawUrl)
+        try {
+            val ct = conn.contentType.orEmpty().lowercase()
+            val disp = conn.getHeaderField("Content-Disposition").orEmpty()
+            val dispName = Regex("""filename\*?=(?:UTF-8''|")?([^";\r\n]+)""", RegexOption.IGNORE_CASE)
+                .find(disp)
+                ?.groupValues
+                ?.get(1)
+                ?.let { decodeUrlName(it.trim('"')) }
+                .orEmpty()
+
+            if (ct.contains("text/html")) {
+                val html = conn.inputStream.bufferedReader().readText()
+                val extracted = extractMediaUrlFromHtml(html, rawUrl) ?: return
+                val extractedName = decodeUrlName(extracted.substringBefore('?').substringAfterLast('/'))
+                    .ifBlank { dispName.ifBlank { "stream_media.mp4" } }
+                val classified = classifyMediaByName(extractedName) ?: (MediaKind.VIDEO to false)
+                val itemKey = sha256(extracted)
+                mediaMap[itemKey] = RemoteMediaItem(
+                    id = itemKey,
+                    title = formatTitle(extractedName),
+                    fileName = extractedName,
+                    kind = classified.first,
+                    sourceType = sourceType,
+                    mediaUrl = extracted,
+                    thumbnailUrl = null,
+                    sizeBytes = 0L,
+                    folderPath = "/web",
+                    isContainer = classified.second,
+                    headers = mapOf("Referer" to rawUrl)
+                )
+            } else {
+                val finalName = dispName.ifBlank {
+                    candidateName.ifBlank {
+                        if (ct.startsWith("image/")) "image_stream.jpg" else "video_stream.mp4"
+                    }
+                }
+                val classified = classifyMediaByName(finalName, ct) ?: (MediaKind.VIDEO to false)
+                val itemKey = sha256(rawUrl)
+                mediaMap[itemKey] = RemoteMediaItem(
+                    id = itemKey,
+                    title = formatTitle(finalName),
+                    fileName = finalName,
+                    kind = classified.first,
+                    sourceType = sourceType,
+                    mediaUrl = rawUrl,
+                    thumbnailUrl = null,
+                    sizeBytes = conn.contentLengthLong.coerceAtLeast(0L),
+                    folderPath = "/web",
+                    isContainer = classified.second
+                )
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun extractMediaUrlFromHtml(html: String, baseUrl: String): String? {
+        val patterns = listOf(
+            Regex("""<source[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+            Regex("""<video[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+            Regex("""property=["']og:video(?::url|:secure_url)?["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+            Regex("""content=["']([^"']+)["'][^>]+property=["']og:video(?::url|:secure_url)?["']""", RegexOption.IGNORE_CASE),
+            Regex("""["']?(?:file|source|video_url|download_url|stream_url)["']?\s*[:=]\s*["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE),
+            Regex("""href=["'](https?://[^"']+\.(?:mp4|mkv|webm|mov|vcv|icv|jpg|jpeg|png|webp)(?:\?[^"']*)?)["']""", RegexOption.IGNORE_CASE),
+            Regex("""property=["']og:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        )
+        for (p in patterns) {
+            val m = p.find(html)
+            if (m != null) {
+                val raw = decodeHtmlEntities(m.groupValues[1].trim()).replace("\\/", "/")
+                if (raw.isNotBlank() && !raw.startsWith("data:") && !raw.startsWith("blob:")) {
+                    return runCatching { URL(URL(baseUrl), raw).toString() }.getOrNull()
+                }
+            }
+        }
+        return null
     }
 
     private fun parseGitHubUrl(rawUrl: String): GitHubLocation? {
@@ -213,12 +591,35 @@ object AutoDiscoveryRepository {
         return ext in IMAGE_EXTS
     }
 
-    private fun discoverGitHubRepo(
+    private fun discoverGitHubSource(
+        originalUrl: String,
         loc: GitHubLocation,
         mediaMap: MutableMap<String, RemoteMediaItem>,
         postMap: MutableMap<String, InfoPost>
     ) {
         val branch = loc.branch ?: resolveDefaultBranch(loc.owner, loc.repo)
+        if (originalUrl.contains("/blob/") && loc.subPath.isNotBlank()) {
+            val fName = loc.subPath.substringAfterLast('/')
+            val classified = classifyMediaByName(fName)
+            if (classified != null) {
+                val rawUrl = buildRawGitHubUrl(loc.owner, loc.repo, branch, loc.subPath)
+                val itemKey = sha256(rawUrl)
+                mediaMap[itemKey] = RemoteMediaItem(
+                    id = itemKey,
+                    title = formatTitle(fName),
+                    fileName = fName,
+                    kind = classified.first,
+                    sourceType = SourceType.GITHUB,
+                    mediaUrl = rawUrl,
+                    thumbnailUrl = null,
+                    sizeBytes = 0L,
+                    folderPath = "/${loc.subPath.substringBeforeLast('/', "")}",
+                    isContainer = classified.second
+                )
+                return
+            }
+        }
+
         val treeUrl = NativeCore.buildGitHubTreeApi(loc.owner, loc.repo, branch)
         val jsonText = httpGetText(treeUrl, isGitHubApi = true) ?: return
         val rootObj = JSONObject(jsonText)
@@ -251,6 +652,9 @@ object AutoDiscoveryRepository {
         }
 
         for (b in filtered) {
+            if (isThumbnailFolderPath(b.path)) continue
+            if (b.path.equals("icon.png", ignoreCase = true)) continue
+
             val fName = b.path.substringAfterLast('/')
             val dir = b.path.substringBeforeLast('/', "")
             val lower = fName.lowercase()
@@ -269,28 +673,27 @@ object AutoDiscoveryRepository {
                 continue
             }
 
-            if (lower.endsWith(".vcv") || lower.endsWith(".icv")) {
-                val isVideo = lower.endsWith(".vcv")
-                val rawUrl = buildRawGitHubUrl(loc.owner, loc.repo, branch, b.path)
-                val thumbUrl = if (isVideo) {
-                    val baseNoExt = lower.substringBeforeLast('.')
-                    thumbByTargetName[lower] ?: thumbByTargetName[baseNoExt]
-                } else {
-                    null
-                }
-                val itemKey = sha256(rawUrl)
-                mediaMap[itemKey] = RemoteMediaItem(
-                    id = itemKey,
-                    title = formatTitle(fName),
-                    fileName = fName,
-                    kind = if (isVideo) MediaKind.VIDEO else MediaKind.IMAGE,
-                    sourceType = SourceType.GITHUB,
-                    mediaUrl = rawUrl,
-                    thumbnailUrl = thumbUrl,
-                    sizeBytes = b.size,
-                    folderPath = if (dir.isEmpty()) "/" else "/$dir"
-                )
+            val classified = classifyMediaByName(fName) ?: continue
+            val rawUrl = buildRawGitHubUrl(loc.owner, loc.repo, branch, b.path)
+            val thumbUrl = if (classified.first == MediaKind.VIDEO) {
+                val baseNoExt = lower.substringBeforeLast('.')
+                thumbByTargetName[lower] ?: thumbByTargetName[baseNoExt]
+            } else {
+                null
             }
+            val itemKey = sha256(rawUrl)
+            mediaMap[itemKey] = RemoteMediaItem(
+                id = itemKey,
+                title = formatTitle(fName),
+                fileName = fName,
+                kind = classified.first,
+                sourceType = SourceType.GITHUB,
+                mediaUrl = rawUrl,
+                thumbnailUrl = thumbUrl,
+                sizeBytes = b.size,
+                folderPath = if (dir.isEmpty()) "/" else "/$dir",
+                isContainer = classified.second
+            )
         }
     }
 
@@ -411,25 +814,24 @@ object AutoDiscoveryRepository {
                 }
                 continue
             }
-            if (lower.endsWith(".vcv") || lower.endsWith(".icv")) {
-                val isVideo = lower.endsWith(".vcv")
-                val itemKey = "gdrive_$fid"
-                val item = RemoteMediaItem(
-                    id = itemKey,
-                    title = formatTitle(name),
-                    fileName = name,
-                    kind = if (isVideo) MediaKind.VIDEO else MediaKind.IMAGE,
-                    sourceType = SourceType.GDRIVE,
-                    mediaUrl = dlUrl,
-                    thumbnailUrl = null,
-                    sizeBytes = 0L,
-                    folderPath = if (folderPath.isBlank()) "/gdrive" else folderPath
-                )
-                if (isVideo) {
-                    pendingVideos.add(item)
-                } else {
-                    mediaMap[itemKey] = item
-                }
+            val classified = classifyMediaByName(name) ?: continue
+            val itemKey = "gdrive_$fid"
+            val item = RemoteMediaItem(
+                id = itemKey,
+                title = formatTitle(name),
+                fileName = name,
+                kind = classified.first,
+                sourceType = SourceType.GDRIVE,
+                mediaUrl = dlUrl,
+                thumbnailUrl = null,
+                sizeBytes = 0L,
+                folderPath = if (folderPath.isBlank()) "/gdrive" else folderPath,
+                isContainer = classified.second
+            )
+            if (classified.first == MediaKind.VIDEO) {
+                pendingVideos.add(item)
+            } else {
+                mediaMap[itemKey] = item
             }
         }
 
@@ -482,6 +884,10 @@ object AutoDiscoveryRepository {
         return base.replace('_', ' ').replace('-', ' ').trim().ifEmpty { fileName }
     }
 
+    private fun decodeUrlName(raw: String): String {
+        return runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+    }
+
     suspend fun loadThumbnailBitmap(context: Context, item: RemoteMediaItem): Bitmap? =
         withContext(Dispatchers.IO) {
             memoryThumbs[item.id]?.let { return@withContext it }
@@ -497,7 +903,7 @@ object AutoDiscoveryRepository {
             }
 
             if (item.thumbnailUrl != null) {
-                val bytes = downloadBytes(item.thumbnailUrl)
+                val bytes = downloadBytes(item.thumbnailUrl, extraHeaders = item.headers)
                 if (bytes != null && bytes.isNotEmpty()) {
                     val bmp = decodeSampledBitmap(bytes)
                     if (bmp != null) {
@@ -527,16 +933,29 @@ object AutoDiscoveryRepository {
     suspend fun streamFullImageBitmap(item: RemoteMediaItem): Bitmap? =
         withContext(Dispatchers.IO) {
             runCatching {
-                val conn = LocalStreamServer.openRemoteConnection(item.mediaUrl)
+                val conn = LocalStreamServer.openRemoteConnection(
+                    startUrl = item.mediaUrl,
+                    extraHeaders = item.headers
+                )
                 try {
                     BufferedInputStream(conn.inputStream, 65_536).use { bis ->
-                        val info = LocalStreamServer.parseContainerHeaderFromStream(bis)
-                        if (info.compression == 0) {
-                            BitmapFactory.decodeStream(bis)
-                        } else {
-                            ZstdDecompressInputStream(bis).use { zstdStream ->
-                                BitmapFactory.decodeStream(zstdStream)
+                        bis.mark(16)
+                        val magic = ByteArray(4)
+                        val n = bis.read(magic)
+                        val mStr = if (n == 4) String(magic, Charsets.US_ASCII) else ""
+                        bis.reset()
+
+                        if (mStr == "SVCV" || mStr == "SICV") {
+                            val info = LocalStreamServer.parseContainerHeaderFromStream(bis)
+                            if (info.compression == 0) {
+                                BitmapFactory.decodeStream(bis)
+                            } else {
+                                ZstdDecompressInputStream(bis).use { zstdStream ->
+                                    BitmapFactory.decodeStream(zstdStream)
+                                }
                             }
+                        } else {
+                            BitmapFactory.decodeStream(bis)
                         }
                     }
                 } finally {
@@ -590,14 +1009,22 @@ object AutoDiscoveryRepository {
         }
     }
 
-    private fun httpGetText(urlStr: String, isGitHubApi: Boolean): String? {
-        val bytes = downloadBytes(urlStr, isGitHubApi) ?: return null
+    private fun httpGetText(
+        urlStr: String,
+        isGitHubApi: Boolean,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): String? {
+        val bytes = downloadBytes(urlStr, isGitHubApi, extraHeaders) ?: return null
         return bytes.toString(Charsets.UTF_8)
     }
 
-    private fun downloadBytes(urlStr: String, isGitHubApi: Boolean = false): ByteArray? {
+    private fun downloadBytes(
+        urlStr: String,
+        isGitHubApi: Boolean = false,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): ByteArray? {
         return try {
-            val conn = openConnectionFollowingRedirects(urlStr, isGitHubApi) ?: return null
+            val conn = openConnectionFollowingRedirects(urlStr, isGitHubApi, extraHeaders) ?: return null
             conn.inputStream.use { input ->
                 val out = ByteArrayOutputStream()
                 val buf = ByteArray(32_768)
@@ -616,6 +1043,7 @@ object AutoDiscoveryRepository {
     private fun openConnectionFollowingRedirects(
         startUrl: String,
         isGitHubApi: Boolean,
+        extraHeaders: Map<String, String> = emptyMap(),
         hops: Int = 0
     ): HttpURLConnection? {
         if (hops > 6) return null
@@ -625,6 +1053,9 @@ object AutoDiscoveryRepository {
             connectTimeout = 15_000
             readTimeout = 30_000
             setRequestProperty("User-Agent", NativeCore.getUserAgent())
+            for ((k, v) in extraHeaders) {
+                setRequestProperty(k, v)
+            }
             if (isGitHubApi) {
                 setRequestProperty("Accept", "application/vnd.github+json")
             }
@@ -634,7 +1065,7 @@ object AutoDiscoveryRepository {
             val location = conn.getHeaderField("Location") ?: return null
             val nextUrl = URL(url, location).toString()
             conn.disconnect()
-            return openConnectionFollowingRedirects(nextUrl, isGitHubApi, hops + 1)
+            return openConnectionFollowingRedirects(nextUrl, isGitHubApi, extraHeaders, hops + 1)
         }
         if (code !in 200..299) {
             conn.disconnect()

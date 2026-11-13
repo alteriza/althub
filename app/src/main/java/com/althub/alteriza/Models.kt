@@ -2,12 +2,23 @@ package com.althub.alteriza
 
 enum class SourceType {
     GITHUB,
-    GDRIVE
+    GDRIVE,
+    PIXELDRAIN,
+    GOFILE,
+    ACEFILE,
+    FILEDOM,
+    DIRECT
 }
 
 enum class MediaKind {
     VIDEO,
     IMAGE
+}
+
+enum class DownloadFormatPref(val label: String) {
+    ASK("ASK EVERY TIME"),
+    ORIGINAL("ORIGINAL FORMAT"),
+    CONTAINER("CONTAINER (.VCV / .ICV)")
 }
 
 data class RemoteMediaItem(
@@ -19,10 +30,13 @@ data class RemoteMediaItem(
     val mediaUrl: String,
     val thumbnailUrl: String?,
     val sizeBytes: Long,
-    val folderPath: String
+    val folderPath: String,
+    val isContainer: Boolean = false,
+    val headers: Map<String, String> = emptyMap()
 )
 
 data class ContainerHeaderInfo(
+    val isContainer: Boolean,
     val headerOffset: Long,
     val compression: Int,
     val originalExt: String,
@@ -42,4 +56,23 @@ data class DiscoveryResult(
     val infoPosts: List<InfoPost>,
     val activeSources: List<String>,
     val errorMessage: String? = null
+)
+
+data class HistoryRecord(
+    val id: String,
+    val title: String,
+    val fileName: String,
+    val kind: MediaKind,
+    val sourceType: SourceType,
+    val mediaUrl: String,
+    val thumbnailUrl: String?,
+    val isContainer: Boolean,
+    val timestampMs: Long
+)
+
+data class DownloadedFileEntry(
+    val name: String,
+    val path: String,
+    val sizeBytes: Long,
+    val isVideo: Boolean
 )
