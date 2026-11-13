@@ -17,4 +17,10 @@ object NativeCore {
         compressionLevel: Int,
         isVideo: Boolean
     ): Int
+
+    external fun zstdStreamCreate(): Long
+
+    external fun zstdStreamDecompress(handle: Long, input: ByteArray, inputLen: Int): ByteArray?
+
+    external fun zstdStreamFree(handle: Long)
 }

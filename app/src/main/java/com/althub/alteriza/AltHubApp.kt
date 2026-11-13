@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.net.Uri
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -30,12 +31,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -113,16 +112,16 @@ import kotlinx.coroutines.launch
 
 private enum class NavDestination(val label: String, val icon: ImageVector) {
     FEED("FEED", Icons.Default.Home),
-    ANIME("ANIME", Icons.Default.Movie),
+    VIDEOS("VIDEOS", Icons.Default.Movie),
     PHOTOS("PHOTOS", Icons.Default.Image),
     INFO("INFO", Icons.Default.Campaign)
 }
 
 private enum class FeedChip(val label: String) {
-    ALL("FOR YOU"),
-    VIDEOS("EPISODES / VCV"),
-    PHOTOS("GALLERY / ICV"),
-    POSTS("UPDATES")
+    ALL("ALL"),
+    VIDEOS("VIDEOS"),
+    PHOTOS("PHOTOS"),
+    INFO("INFO")
 }
 
 private sealed class TimelineEntry {
@@ -166,14 +165,22 @@ fun AltHubApp() {
     }
 
     var selectedMedia by remember { mutableStateOf<RemoteMediaItem?>(null) }
-    var viewerVideo by remember { mutableStateOf<PreparedVideo?>(null) }
-    var viewerImageBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var viewerLoading by remember { mutableStateOf(false) }
+
+    fun openMedia(item: RemoteMediaItem) {
+        val cachedThumb = AutoDiscoveryRepository.getCachedThumbnail(item.id)
+        if (cachedThumb != null) {
+            activity?.requestedOrientation = if (cachedThumb.width > cachedThumb.height) {
+                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+            applyImmersiveSystemBars(activity)
+        }
+        selectedMedia = item
+    }
 
     fun closeViewer() {
         selectedMedia = null
-        viewerVideo = null
-        viewerImageBitmap = null
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         applyImmersiveSystemBars(activity)
     }
@@ -223,7 +230,7 @@ fun AltHubApp() {
                 FeedChip.ALL -> true
                 FeedChip.VIDEOS -> item.kind == MediaKind.VIDEO
                 FeedChip.PHOTOS -> item.kind == MediaKind.IMAGE
-                FeedChip.POSTS -> false
+                FeedChip.INFO -> false
             }
             val matchQuery = searchQuery.isBlank() ||
                 item.title.contains(searchQuery, true) ||
@@ -231,7 +238,7 @@ fun AltHubApp() {
             matchChip && matchQuery
         }.map { TimelineEntry.MediaEntry(it) }
 
-        val postList = if (activeFeedChip == FeedChip.ALL || activeFeedChip == FeedChip.POSTS) {
+        val postList = if (activeFeedChip == FeedChip.ALL || activeFeedChip == FeedChip.INFO) {
             allPosts.map { TimelineEntry.PostEntry(it) }
         } else {
             emptyList()
@@ -305,7 +312,7 @@ fun AltHubApp() {
                                     modifier = Modifier.size(28.dp)
                                 )
                                 Text(
-                                    text = "SYNCING STREAM FEED...",
+                                    text = "SYNCING FEED...",
                                     color = BbWhite,
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 11.sp,
@@ -324,9 +331,9 @@ fun AltHubApp() {
                         ) {
                             if (featuredItem != null && searchQuery.isBlank() && activeFeedChip == FeedChip.ALL) {
                                 item(key = "hero_${featuredItem.id}") {
-                                    AnimeHeroSpotlight(
+                                    FeaturedMediaSpotlight(
                                         item = featuredItem,
-                                        onPlay = { selectedMedia = featuredItem }
+                                        onOpen = { openMedia(featuredItem) }
                                     )
                                 }
                             }
@@ -367,7 +374,7 @@ fun AltHubApp() {
                                         is TimelineEntry.MediaEntry -> {
                                             SocialStreamPostCard(
                                                 item = entry.item,
-                                                onOpen = { selectedMedia = entry.item },
+                                                onOpen = { openMedia(entry.item) },
                                                 modifier = Modifier.padding(horizontal = 14.dp)
                                             )
                                         }
@@ -383,11 +390,11 @@ fun AltHubApp() {
                         }
                     }
 
-                    currentTab == NavDestination.ANIME -> {
+                    currentTab == NavDestination.VIDEOS -> {
                         if (allVideos.isEmpty()) {
                             EmptyFeedBox(
-                                title = "NO .VCV EPISODES FOUND",
-                                subtitle = discovery.errorMessage ?: "Repository belum memiliki file .vcv"
+                                title = "NO VIDEOS FOUND",
+                                subtitle = discovery.errorMessage ?: "Belum ada video di repository"
                             )
                         } else {
                             LazyColumn(
@@ -396,10 +403,10 @@ fun AltHubApp() {
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 itemsIndexed(allVideos, key = { _, item -> item.id }) { idx, video ->
-                                    AnimeEpisodeCard(
-                                        episodeNumber = allVideos.size - idx,
+                                    VideoStreamCard(
+                                        indexNumber = allVideos.size - idx,
                                         item = video,
-                                        onWatch = { selectedMedia = video }
+                                        onWatch = { openMedia(video) }
                                     )
                                 }
                             }
@@ -409,8 +416,8 @@ fun AltHubApp() {
                     currentTab == NavDestination.PHOTOS -> {
                         if (allPhotos.isEmpty()) {
                             EmptyFeedBox(
-                                title = "NO .ICV PHOTOS FOUND",
-                                subtitle = discovery.errorMessage ?: "Repository belum memiliki file .icv"
+                                title = "NO PHOTOS FOUND",
+                                subtitle = discovery.errorMessage ?: "Belum ada foto di repository"
                             )
                         } else {
                             LazyColumn(
@@ -421,7 +428,7 @@ fun AltHubApp() {
                                 items(allPhotos, key = { it.id }) { photo ->
                                     SocialStreamPostCard(
                                         item = photo,
-                                        onOpen = { selectedMedia = photo }
+                                        onOpen = { openMedia(photo) }
                                     )
                                 }
                             }
@@ -431,7 +438,7 @@ fun AltHubApp() {
                     currentTab == NavDestination.INFO -> {
                         if (allPosts.isEmpty()) {
                             EmptyFeedBox(
-                                title = "NO ANNOUNCEMENTS",
+                                title = "NO INFO POSTS",
                                 subtitle = "Sumber: ${AutoDiscoveryRepository.MAIN_POST_URL}"
                             )
                         } else {
@@ -478,113 +485,37 @@ fun AltHubApp() {
                 }
             }
 
-            LaunchedEffect(activeMedia.id) {
-                viewerVideo = null
-                viewerImageBitmap = null
-                viewerLoading = true
-                if (activeMedia.kind == MediaKind.VIDEO) {
-                    val prepared = AutoDiscoveryRepository.prepareVideoForPlayback(context, activeMedia)
-                    if (prepared != null) {
-                        activity?.requestedOrientation = if (prepared.isLandscape) {
-                            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                        } else {
-                            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                        }
-                        applyImmersiveSystemBars(activity)
-                    }
-                    viewerVideo = prepared
-                } else {
-                    val bmp = AutoDiscoveryRepository.loadFullImageBitmap(context, activeMedia)
-                    if (bmp != null) {
-                        activity?.requestedOrientation = if (bmp.width > bmp.height) {
-                            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                        } else {
-                            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                        }
-                        applyImmersiveSystemBars(activity)
-                    }
-                    viewerImageBitmap = bmp
-                }
-                viewerLoading = false
-            }
-
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(BbBlack)
             ) {
-                when {
-                    viewerLoading -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                                modifier = Modifier
-                                    .background(BbSurface)
-                                    .border(1.dp, BbBorder)
-                                    .padding(24.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    color = BbOrange,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                                Text(
-                                    text = "BUFFERING ${activeMedia.fileName.uppercase()}...",
-                                    color = BbWhite,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp
-                                )
+                if (activeMedia.kind == MediaKind.VIDEO) {
+                    CubicStreamingVideoPlayer(
+                        item = activeMedia,
+                        onOrientationResolved = { isLandscape ->
+                            activity?.requestedOrientation = if (isLandscape) {
+                                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            } else {
+                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
                             }
-                        }
-                    }
-
-                    activeMedia.kind == MediaKind.VIDEO && viewerVideo != null -> {
-                        CubicVideoPlayer(
-                            title = activeMedia.title,
-                            prepared = viewerVideo!!,
-                            onOrientationResolved = { isLandscape ->
-                                activity?.requestedOrientation = if (isLandscape) {
-                                    ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                                } else {
-                                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                                }
-                                applyImmersiveSystemBars(activity)
-                            },
-                            onBack = { closeViewer() }
-                        )
-                    }
-
-                    activeMedia.kind == MediaKind.IMAGE && viewerImageBitmap != null -> {
-                        CubicImageViewer(
-                            title = activeMedia.title,
-                            bitmap = viewerImageBitmap!!,
-                            onBack = { closeViewer() }
-                        )
-                    }
-
-                    else -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(24.dp),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "FAILED TO DECODE STREAM",
-                                color = BbOrange,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(Modifier.height(16.dp))
-                            CubicActionButton(
-                                text = "BACK TO FEED",
-                                primary = true,
-                                onClick = { closeViewer() }
-                            )
-                        }
-                    }
+                            applyImmersiveSystemBars(activity)
+                        },
+                        onBack = { closeViewer() }
+                    )
+                } else {
+                    CubicStreamingImageViewer(
+                        item = activeMedia,
+                        onOrientationResolved = { isLandscape ->
+                            activity?.requestedOrientation = if (isLandscape) {
+                                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            } else {
+                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                            }
+                            applyImmersiveSystemBars(activity)
+                        },
+                        onBack = { closeViewer() }
+                    )
                 }
             }
         }
@@ -678,7 +609,7 @@ private fun SocialTopBar(
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                text = "STREAM",
+                                text = "LIVE",
                                 color = BbWhite,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 9.sp,
@@ -688,7 +619,7 @@ private fun SocialTopBar(
                     }
                 }
                 Text(
-                    text = "@alteriza // SOCIAL & ANIME HUB",
+                    text = "v${BuildConfig.VERSION_NAME}",
                     color = BbMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp
@@ -728,7 +659,7 @@ private fun SocialTopBar(
                 Box(modifier = Modifier.weight(1f)) {
                     if (searchQuery.isEmpty()) {
                         Text(
-                            text = "SEARCH EPISODES, PHOTOS, POSTS...",
+                            text = "SEARCH VIDEOS, PHOTOS, INFO...",
                             color = BbMuted,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp
@@ -763,15 +694,17 @@ private fun SocialTopBar(
 }
 
 @Composable
-private fun AnimeHeroSpotlight(
+private fun FeaturedMediaSpotlight(
     item: RemoteMediaItem,
-    onPlay: () -> Unit
+    onOpen: () -> Unit
 ) {
     val context = LocalContext.current
-    var thumb by remember(item.id) { mutableStateOf<Bitmap?>(null) }
+    var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
 
     LaunchedEffect(item.id) {
-        thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
+        if (thumb == null) {
+            thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
+        }
     }
 
     Box(
@@ -780,7 +713,7 @@ private fun AnimeHeroSpotlight(
             .aspectRatio(16f / 10f)
             .background(BbBlack)
             .border(1.dp, BbBorder)
-            .clickable(onClick = onPlay)
+            .clickable(onClick = onOpen)
     ) {
         val b = thumb
         if (b != null) {
@@ -819,7 +752,7 @@ private fun AnimeHeroSpotlight(
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = if (item.kind == MediaKind.VIDEO) "FEATURED STREAM // VCV" else "FEATURED DROP // ICV",
+                    text = if (item.kind == MediaKind.VIDEO) "FEATURED VIDEO" else "FEATURED PHOTO",
                     color = BbWhite,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
@@ -841,10 +774,10 @@ private fun AnimeHeroSpotlight(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 CubicActionButton(
-                    text = if (item.kind == MediaKind.VIDEO) "WATCH NOW" else "OPEN FULL",
+                    text = if (item.kind == MediaKind.VIDEO) "WATCH NOW" else "OPEN PHOTO",
                     icon = Icons.Default.NorthEast,
                     primary = true,
-                    onClick = onPlay
+                    onClick = onOpen
                 )
                 Box(
                     modifier = Modifier
@@ -855,7 +788,7 @@ private fun AnimeHeroSpotlight(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "${item.sourceType.name} CDN",
+                        text = item.sourceType.name,
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -908,12 +841,14 @@ private fun SocialStreamPostCard(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var thumb by remember(item.id) { mutableStateOf<Bitmap?>(null) }
-    var thumbLoading by remember(item.id) { mutableStateOf(true) }
+    var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
+    var thumbLoading by remember(item.id) { mutableStateOf(thumb == null) }
 
     LaunchedEffect(item.id) {
-        thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
-        thumbLoading = false
+        if (thumb == null) {
+            thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
+            thumbLoading = false
+        }
     }
 
     Column(
@@ -985,7 +920,7 @@ private fun SocialStreamPostCard(
                     )
                     Spacer(Modifier.width(5.dp))
                     Text(
-                        text = if (item.kind == MediaKind.VIDEO) "VCV" else "ICV",
+                        text = if (item.kind == MediaKind.VIDEO) "VIDEO" else "PHOTO",
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
@@ -1025,7 +960,7 @@ private fun SocialStreamPostCard(
                 )
             } else {
                 Text(
-                    text = if (item.kind == MediaKind.VIDEO) "[ VCV STREAM ]" else "[ ICV IMAGE ]",
+                    text = if (item.kind == MediaKind.VIDEO) "[ VIDEO ]" else "[ PHOTO ]",
                     color = BbMuted,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp
@@ -1099,18 +1034,20 @@ private fun SocialStreamPostCard(
 }
 
 @Composable
-private fun AnimeEpisodeCard(
-    episodeNumber: Int,
+private fun VideoStreamCard(
+    indexNumber: Int,
     item: RemoteMediaItem,
     onWatch: () -> Unit
 ) {
     val context = LocalContext.current
-    var thumb by remember(item.id) { mutableStateOf<Bitmap?>(null) }
-    var thumbLoading by remember(item.id) { mutableStateOf(true) }
+    var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
+    var thumbLoading by remember(item.id) { mutableStateOf(thumb == null) }
 
     LaunchedEffect(item.id) {
-        thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
-        thumbLoading = false
+        if (thumb == null) {
+            thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
+            thumbLoading = false
+        }
     }
 
     Column(
@@ -1155,7 +1092,7 @@ private fun AnimeEpisodeCard(
                     Box(Modifier.size(5.dp).background(BbOrange))
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "EP.%02d • VCV".format(episodeNumber),
+                        text = "VIDEO #%02d".format(indexNumber),
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
@@ -1287,7 +1224,7 @@ private fun SocialAnnouncementCard(
                     .padding(horizontal = 6.dp, vertical = 3.dp)
             ) {
                 Text(
-                    text = "BBCODE",
+                    text = "INFO",
                     color = BbOrange,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
@@ -1341,7 +1278,7 @@ private fun CubicBottomNavBar(
             val selected = current == dest
             val badge = when (dest) {
                 NavDestination.FEED -> ""
-                NavDestination.ANIME -> " [$videoCount]"
+                NavDestination.VIDEOS -> " [$videoCount]"
                 NavDestination.PHOTOS -> " [$photoCount]"
                 NavDestination.INFO -> " [$infoCount]"
             }
@@ -1507,17 +1444,18 @@ private fun EmptyFeedBox(
 }
 
 @Composable
-private fun CubicVideoPlayer(
-    title: String,
-    prepared: PreparedVideo,
+private fun CubicStreamingVideoPlayer(
+    item: RemoteMediaItem,
     onOrientationResolved: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
+    val streamUrl = remember(item.id) { LocalStreamServer.getStreamUrl(item) }
     var videoView by remember { mutableStateOf<VideoView?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableIntStateOf(0) }
     var durationMs by remember { mutableIntStateOf(1) }
     var ready by remember { mutableStateOf(false) }
+    var hasError by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
     var interactionTick by remember { mutableIntStateOf(0) }
     var isSeeking by remember { mutableStateOf(false) }
@@ -1568,7 +1506,7 @@ private fun CubicVideoPlayer(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             Gravity.CENTER
                         )
-                        setVideoPath(prepared.file.absolutePath)
+                        setVideoURI(Uri.parse(streamUrl))
                         setOnPreparedListener { mp ->
                             durationMs = mp.duration.coerceAtLeast(1)
                             ready = true
@@ -1585,6 +1523,11 @@ private fun CubicVideoPlayer(
                             positionMs = durationMs
                             controlsVisible = true
                         }
+                        setOnErrorListener { _, _, _ ->
+                            hasError = true
+                            controlsVisible = true
+                            true
+                        }
                     }
                     videoView = vv
                     addView(vv)
@@ -1592,6 +1535,40 @@ private fun CubicVideoPlayer(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        if (!ready && !hasError) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    color = BbOrange,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+        }
+
+        if (hasError) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(BbSurface)
+                    .border(1.dp, BbBorder)
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "STREAM UNAVAILABLE",
+                    color = BbOrange,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+                CubicActionButton(
+                    text = "BACK",
+                    primary = true,
+                    onClick = onBack
+                )
+            }
+        }
 
         AnimatedVisibility(
             visible = controlsVisible,
@@ -1622,7 +1599,7 @@ private fun CubicVideoPlayer(
                     )
                     Spacer(Modifier.width(12.dp))
                     Text(
-                        text = title.uppercase(),
+                        text = item.title.uppercase(),
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
@@ -1732,16 +1709,30 @@ private fun CubicVideoPlayer(
 }
 
 @Composable
-private fun CubicImageViewer(
-    title: String,
-    bitmap: Bitmap,
+private fun CubicStreamingImageViewer(
+    item: RemoteMediaItem,
+    onOrientationResolved: (Boolean) -> Unit,
     onBack: () -> Unit
 ) {
+    var bitmap by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
+    var isFullLoaded by remember(item.id) { mutableStateOf(false) }
+    var loadFailed by remember(item.id) { mutableStateOf(false) }
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     var controlsVisible by remember { mutableStateOf(true) }
     var interactionTick by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(item.id) {
+        val fullBmp = AutoDiscoveryRepository.streamFullImageBitmap(item)
+        if (fullBmp != null) {
+            bitmap = fullBmp
+            isFullLoaded = true
+            onOrientationResolved(fullBmp.width > fullBmp.height)
+        } else if (bitmap == null) {
+            loadFailed = true
+        }
+    }
 
     LaunchedEffect(controlsVisible, interactionTick) {
         if (controlsVisible) {
@@ -1786,19 +1777,61 @@ private fun CubicImageViewer(
                 )
             }
     ) {
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = title,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = offsetX,
-                    translationY = offsetY
+        val activeBmp = bitmap
+        if (activeBmp != null) {
+            Image(
+                bitmap = activeBmp.asImageBitmap(),
+                contentDescription = item.title,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        translationX = offsetX,
+                        translationY = offsetY
+                    )
+            )
+        }
+
+        if (!isFullLoaded && !loadFailed) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(BbBlack.copy(alpha = 0.65f))
+                    .padding(10.dp)
+            ) {
+                CircularProgressIndicator(
+                    color = BbOrange,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(26.dp)
                 )
-        )
+            }
+        }
+
+        if (loadFailed) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(BbSurface)
+                    .border(1.dp, BbBorder)
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "FAILED TO STREAM PHOTO",
+                    color = BbOrange,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+                CubicActionButton(
+                    text = "BACK",
+                    primary = true,
+                    onClick = onBack
+                )
+            }
+        }
 
         AnimatedVisibility(
             visible = controlsVisible,
@@ -1829,7 +1862,7 @@ private fun CubicImageViewer(
                     )
                     Spacer(Modifier.width(12.dp))
                     Text(
-                        text = title.uppercase(),
+                        text = item.title.uppercase(),
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
@@ -1852,29 +1885,31 @@ private fun CubicImageViewer(
                     }
                 }
 
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                        .background(BbBlack.copy(alpha = 0.85f))
-                        .border(1.dp, BbBorder)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "${bitmap.width}x${bitmap.height} PX",
-                        color = BbMuted,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp
-                    )
-                    Text(
-                        text = "ZOOM ${(scale * 100).toInt()}% • TAP TO HIDE",
-                        color = BbWhite,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp
-                    )
+                if (activeBmp != null) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                            .background(BbBlack.copy(alpha = 0.85f))
+                            .border(1.dp, BbBorder)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "${activeBmp.width}x${activeBmp.height} PX",
+                            color = BbMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            text = "ZOOM ${(scale * 100).toInt()}%",
+                            color = BbWhite,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp
+                        )
+                    }
                 }
             }
         }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -15,12 +16,16 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 object AutoDiscoveryRepository {
     const val MAIN_CDN_URL = "https://github.com/alteriza/althub/cdn.txt"
     const val MAIN_POST_URL = "https://github.com/alteriza/althub/post/"
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AltHub/1.0"
     private const val MAX_THUMB_DIM = 720
+    private val IMAGE_EXTS = setOf("png", "jpg", "jpeg", "webp", "gif")
+
+    private val memoryThumbs = ConcurrentHashMap<String, Bitmap>()
 
     private data class GitHubLocation(
         val owner: String,
@@ -28,6 +33,8 @@ object AutoDiscoveryRepository {
         val branch: String?,
         val subPath: String
     )
+
+    fun getCachedThumbnail(itemId: String): Bitmap? = memoryThumbs[itemId]
 
     suspend fun discoverAll(): DiscoveryResult = withContext(Dispatchers.IO) {
         val mediaMap = linkedMapOf<String, RemoteMediaItem>()
@@ -55,7 +62,7 @@ object AutoDiscoveryRepository {
                     val folderId = extractDriveId(src)
                     if (folderId != null) {
                         runCatching {
-                            discoverGoogleDriveFolder(folderId, "", 0, mediaMap, postMap)
+                            discoverGoogleDriveRoot(folderId, mediaMap, postMap)
                         }.onFailure {
                             errors.add("Drive ($folderId): ${it.message}")
                         }
@@ -75,7 +82,7 @@ object AutoDiscoveryRepository {
                     val name = src.substringAfterLast('/').substringBefore('?')
                     val isVideo = name.endsWith(".vcv", true)
                     val baseDir = src.substringBeforeLast('/')
-                    val thumb = if (isVideo) "$baseDir/thumb_$name.png" else null
+                    val thumb = if (isVideo) "$baseDir/.thumbnail/$name.png" else null
                     mediaMap[src] = RemoteMediaItem(
                         id = sha256(src),
                         title = formatTitle(name),
@@ -177,6 +184,18 @@ object AutoDiscoveryRepository {
         return "https://raw.githubusercontent.com/$owner/$repo/$branch/$encodedPath"
     }
 
+    private fun isThumbnailFolderPath(path: String): Boolean {
+        val lower = path.lowercase()
+        return lower.startsWith(".thumbnail/") ||
+            lower.startsWith("root/.thumbnail/") ||
+            lower.contains("/.thumbnail/")
+    }
+
+    private fun isImageExtension(fileName: String): Boolean {
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        return ext in IMAGE_EXTS
+    }
+
     private fun discoverGitHubRepo(
         loc: GitHubLocation,
         mediaMap: MutableMap<String, RemoteMediaItem>,
@@ -202,14 +221,15 @@ object AutoDiscoveryRepository {
         val prefix = if (loc.subPath.isBlank()) "" else "${loc.subPath.trim('/')}/"
         val filtered = blobs.filter { prefix.isEmpty() || it.path.startsWith(prefix) }
 
-        val thumbByFullPath = mutableMapOf<String, String>()
-        val thumbByName = mutableMapOf<String, String>()
+        val thumbByTargetName = mutableMapOf<String, String>()
         for (b in filtered) {
-            val fName = b.path.substringAfterLast('/')
-            if (fName.startsWith("thumb_", true) && fName.endsWith(".png", true)) {
-                val raw = buildRawGitHubUrl(loc.owner, loc.repo, branch, b.path)
-                thumbByFullPath[b.path.lowercase()] = raw
-                thumbByName[fName.lowercase()] = raw
+            if (isThumbnailFolderPath(b.path)) {
+                val fName = b.path.substringAfterLast('/')
+                if (isImageExtension(fName)) {
+                    val raw = buildRawGitHubUrl(loc.owner, loc.repo, branch, b.path)
+                    val targetKey = fName.substringBeforeLast('.').lowercase()
+                    thumbByTargetName[targetKey] = raw
+                }
             }
         }
 
@@ -236,13 +256,8 @@ object AutoDiscoveryRepository {
                 val isVideo = lower.endsWith(".vcv")
                 val rawUrl = buildRawGitHubUrl(loc.owner, loc.repo, branch, b.path)
                 val thumbUrl = if (isVideo) {
-                    val exactKey = if (dir.isEmpty()) "thumb_$lower.png" else "$dir/thumb_$lower.png".lowercase()
                     val baseNoExt = lower.substringBeforeLast('.')
-                    val altKey = if (dir.isEmpty()) "thumb_$baseNoExt.png" else "$dir/thumb_$baseNoExt.png".lowercase()
-                    thumbByFullPath[exactKey]
-                        ?: thumbByName["thumb_$lower.png"]
-                        ?: thumbByFullPath[altKey]
-                        ?: thumbByName["thumb_$baseNoExt.png"]
+                    thumbByTargetName[lower] ?: thumbByTargetName[baseNoExt]
                 } else {
                     null
                 }
@@ -306,10 +321,36 @@ object AutoDiscoveryRepository {
         return "https://drive.usercontent.google.com/download?id=$fileId&export=download&confirm=t"
     }
 
+    private fun discoverGoogleDriveRoot(
+        rootFolderId: String,
+        mediaMap: MutableMap<String, RemoteMediaItem>,
+        postMap: MutableMap<String, InfoPost>
+    ) {
+        val thumbByTargetName = mutableMapOf<String, String>()
+        val pendingVideos = mutableListOf<RemoteMediaItem>()
+        discoverGoogleDriveFolder(
+            folderId = rootFolderId,
+            folderPath = "",
+            depth = 0,
+            thumbByTargetName = thumbByTargetName,
+            pendingVideos = pendingVideos,
+            mediaMap = mediaMap,
+            postMap = postMap
+        )
+        for (v in pendingVideos) {
+            val lower = v.fileName.lowercase()
+            val baseNoExt = lower.substringBeforeLast('.')
+            val resolvedThumb = thumbByTargetName[lower] ?: thumbByTargetName[baseNoExt]
+            mediaMap[v.id] = v.copy(thumbnailUrl = resolvedThumb)
+        }
+    }
+
     private fun discoverGoogleDriveFolder(
         folderId: String,
         folderPath: String,
         depth: Int,
+        thumbByTargetName: MutableMap<String, String>,
+        pendingVideos: MutableList<RemoteMediaItem>,
         mediaMap: MutableMap<String, RemoteMediaItem>,
         postMap: MutableMap<String, InfoPost>
     ) {
@@ -336,17 +377,17 @@ object AutoDiscoveryRepository {
             }
         }
 
-        val thumbByName = mutableMapOf<String, String>()
-        for ((fid, name) in files) {
-            if (name.startsWith("thumb_", true) && name.endsWith(".png", true)) {
-                thumbByName[name.lowercase()] = buildDriveDownloadUrl(fid)
-            }
-        }
-
+        val inThumbFolder = folderPath.endsWith("/.thumbnail", true) || folderPath.equals(".thumbnail", true)
         val inPostFolder = folderPath.endsWith("/post", true) || folderPath.equals("post", true)
+
         for ((fid, name) in files) {
             val lower = name.lowercase()
             val dlUrl = buildDriveDownloadUrl(fid)
+            if (inThumbFolder && isImageExtension(name)) {
+                val targetKey = name.substringBeforeLast('.').lowercase()
+                thumbByTargetName[targetKey] = dlUrl
+                continue
+            }
             if (inPostFolder && isPostFile(lower)) {
                 val postKey = "gdrive/$fid"
                 if (!postMap.containsKey(postKey)) {
@@ -359,35 +400,42 @@ object AutoDiscoveryRepository {
             }
             if (lower.endsWith(".vcv") || lower.endsWith(".icv")) {
                 val isVideo = lower.endsWith(".vcv")
-                val thumbUrl = if (isVideo) {
-                    val baseNoExt = lower.substringBeforeLast('.')
-                    thumbByName["thumb_$lower.png"] ?: thumbByName["thumb_$baseNoExt.png"]
-                } else {
-                    null
-                }
                 val itemKey = "gdrive_$fid"
-                mediaMap[itemKey] = RemoteMediaItem(
+                val item = RemoteMediaItem(
                     id = itemKey,
                     title = formatTitle(name),
                     fileName = name,
                     kind = if (isVideo) MediaKind.VIDEO else MediaKind.IMAGE,
                     sourceType = SourceType.GDRIVE,
                     mediaUrl = dlUrl,
-                    thumbnailUrl = thumbUrl,
+                    thumbnailUrl = null,
                     sizeBytes = 0L,
                     folderPath = if (folderPath.isBlank()) "/gdrive" else folderPath
                 )
+                if (isVideo) {
+                    pendingVideos.add(item)
+                } else {
+                    mediaMap[itemKey] = item
+                }
             }
         }
 
         for ((subId, subName) in subFolders) {
             val nextPath = if (folderPath.isBlank()) "/$subName" else "$folderPath/$subName"
-            discoverGoogleDriveFolder(subId, nextPath, depth + 1, mediaMap, postMap)
+            discoverGoogleDriveFolder(
+                folderId = subId,
+                folderPath = nextPath,
+                depth = depth + 1,
+                thumbByTargetName = thumbByTargetName,
+                pendingVideos = pendingVideos,
+                mediaMap = mediaMap,
+                postMap = postMap
+            )
         }
     }
 
     private fun isPostFile(lowerName: String): Boolean {
-        if (lowerName.endsWith(".vcv") || lowerName.endsWith(".icv") || lowerName.endsWith(".png") || lowerName.endsWith(".jpg")) {
+        if (lowerName.endsWith(".vcv") || lowerName.endsWith(".icv") || isImageExtension(lowerName)) {
             return false
         }
         return lowerName.endsWith(".bbcode") ||
@@ -423,12 +471,16 @@ object AutoDiscoveryRepository {
 
     suspend fun loadThumbnailBitmap(context: Context, item: RemoteMediaItem): Bitmap? =
         withContext(Dispatchers.IO) {
+            memoryThumbs[item.id]?.let { return@withContext it }
+
             val thumbDir = File(context.cacheDir, "althub_thumbs").apply { mkdirs() }
             val cacheFile = File(thumbDir, "${sha256(item.id)}.png")
             if (cacheFile.exists() && cacheFile.length() > 0L) {
-                return@withContext runCatching {
-                    BitmapFactory.decodeFile(cacheFile.absolutePath)
-                }.getOrNull()
+                val diskBmp = runCatching { BitmapFactory.decodeFile(cacheFile.absolutePath) }.getOrNull()
+                if (diskBmp != null) {
+                    memoryThumbs[item.id] = diskBmp
+                    return@withContext diskBmp
+                }
             }
 
             if (item.thumbnailUrl != null) {
@@ -436,94 +488,55 @@ object AutoDiscoveryRepository {
                 if (bytes != null && bytes.isNotEmpty()) {
                     val bmp = decodeSampledBitmap(bytes)
                     if (bmp != null) {
+                        memoryThumbs[item.id] = bmp
                         saveBitmapCache(bmp, cacheFile)
                         return@withContext bmp
                     }
                 }
             }
 
-            val containerFile = ensureContainerCached(context, item) ?: return@withContext null
             if (item.kind == MediaKind.IMAGE) {
-                val rawBytes = NativeCore.decodeToBytes(containerFile.absolutePath) ?: return@withContext null
-                val bmp = decodeSampledBitmap(rawBytes) ?: return@withContext null
-                saveBitmapCache(bmp, cacheFile)
-                bmp
+                val fullBmp = streamFullImageBitmap(item) ?: return@withContext null
+                val scaled = scaleDown(fullBmp)
+                memoryThumbs[item.id] = scaled
+                saveBitmapCache(scaled, cacheFile)
+                scaled
             } else {
-                val prepared = prepareVideoForPlayback(context, item) ?: return@withContext null
-                val frame = extractVideoFrame(prepared.file.absolutePath) ?: return@withContext null
+                val streamUrl = LocalStreamServer.getStreamUrl(item)
+                val frame = extractVideoFrameFromUrl(streamUrl) ?: return@withContext null
                 val scaled = scaleDown(frame)
+                memoryThumbs[item.id] = scaled
                 saveBitmapCache(scaled, cacheFile)
                 scaled
             }
         }
 
-    suspend fun loadFullImageBitmap(context: Context, item: RemoteMediaItem): Bitmap? =
+    suspend fun streamFullImageBitmap(item: RemoteMediaItem): Bitmap? =
         withContext(Dispatchers.IO) {
-            val containerFile = ensureContainerCached(context, item) ?: return@withContext null
-            val rawBytes = NativeCore.decodeToBytes(containerFile.absolutePath) ?: return@withContext null
-            BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
-        }
-
-    suspend fun prepareVideoForPlayback(context: Context, item: RemoteMediaItem): PreparedVideo? =
-        withContext(Dispatchers.IO) {
-            val containerFile = ensureContainerCached(context, item) ?: return@withContext null
-            val decodedDir = File(context.cacheDir, "althub_decoded").apply { mkdirs() }
-            val headerJson = NativeCore.readHeader(containerFile.absolutePath)
-            val ext = runCatching {
-                JSONObject(headerJson ?: "{}").optString("original_ext", "")
-            }.getOrDefault("").ifBlank { "mp4" }
-            val outFile = File(decodedDir, "${sha256(item.id)}.$ext")
-            if (!outFile.exists() || outFile.length() == 0L) {
-                val rc = NativeCore.decodeToFile(containerFile.absolutePath, outFile.absolutePath)
-                if (rc != 0 || !outFile.exists() || outFile.length() == 0L) {
-                    outFile.delete()
-                    return@withContext null
+            runCatching {
+                val conn = LocalStreamServer.openRemoteConnection(item.mediaUrl)
+                try {
+                    BufferedInputStream(conn.inputStream, 65_536).use { bis ->
+                        val info = LocalStreamServer.parseContainerHeaderFromStream(bis)
+                        if (info.compression == 0) {
+                            BitmapFactory.decodeStream(bis)
+                        } else {
+                            ZstdDecompressInputStream(bis).use { zstdStream ->
+                                BitmapFactory.decodeStream(zstdStream)
+                            }
+                        }
+                    }
+                } finally {
+                    conn.disconnect()
                 }
-            }
-            val dims = probeVideoDimensions(outFile.absolutePath)
-            PreparedVideo(file = outFile, width = dims.first, height = dims.second)
+            }.getOrNull()
         }
 
-    private fun probeVideoDimensions(path: String): Pair<Int, Int> {
+    private fun extractVideoFrameFromUrl(streamUrl: String): Bitmap? {
         return try {
             val mmr = MediaMetadataRetriever()
             try {
-                mmr.setDataSource(path)
-                val rawW = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 16
-                val rawH = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 9
-                val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-                if (rot == 90 || rot == 270) rawH to rawW else rawW to rawH
-            } finally {
-                runCatching { mmr.release() }
-            }
-        } catch (_: Throwable) {
-            16 to 9
-        }
-    }
-
-    private fun ensureContainerCached(context: Context, item: RemoteMediaItem): File? {
-        val rawDir = File(context.cacheDir, "althub_containers").apply { mkdirs() }
-        val ext = if (item.kind == MediaKind.VIDEO) "vcv" else "icv"
-        val target = File(rawDir, "${sha256(item.mediaUrl)}.$ext")
-        if (target.exists() && target.length() > 0L) {
-            return target
-        }
-        val tmp = File(rawDir, "${sha256(item.mediaUrl)}_${System.currentTimeMillis()}.tmp")
-        val ok = downloadToFile(item.mediaUrl, tmp)
-        if (!ok || !tmp.exists() || tmp.length() == 0L) {
-            tmp.delete()
-            return null
-        }
-        if (target.exists()) target.delete()
-        tmp.renameTo(target)
-        return target
-    }
-
-    private fun extractVideoFrame(path: String): Bitmap? {
-        return try {
-            val mmr = MediaMetadataRetriever()
-            try {
-                mmr.setDataSource(path)
+                mmr.setDataSource(streamUrl, HashMap())
                 mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             } finally {
                 runCatching { mmr.release() }
@@ -584,26 +597,6 @@ object AutoDiscoveryRepository {
             }
         } catch (_: Throwable) {
             null
-        }
-    }
-
-    private fun downloadToFile(urlStr: String, destFile: File): Boolean {
-        return try {
-            val conn = openConnectionFollowingRedirects(urlStr, false) ?: return false
-            conn.inputStream.use { input ->
-                FileOutputStream(destFile).use { output ->
-                    val buf = ByteArray(65_536)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        output.write(buf, 0, n)
-                    }
-                    output.flush()
-                }
-            }
-            true
-        } catch (_: Throwable) {
-            false
         }
     }
 

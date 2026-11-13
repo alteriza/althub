@@ -1,10 +1,12 @@
-use jni::objects::{JObject, JString};
-use jni::sys::{jboolean, jbyteArray, jint, jstring};
+use jni::objects::{JByteArray, JObject, JString};
+use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
+use zstd::stream::raw::{Decoder, Operation};
 
 const MAGIC_VIDEO: &[u8; 4] = b"SVCV";
 const MAGIC_IMAGE: &[u8; 4] = b"SICV";
@@ -17,6 +19,10 @@ struct Header {
     compression: u8,
     original_ext: String,
     original_size: u64,
+}
+
+struct ZstdStreamHandle {
+    decoder: Decoder<'static>,
 }
 
 fn read_header_from_reader<R: Read>(reader: &mut R) -> Result<Header, i32> {
@@ -233,4 +239,83 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_encodeFromFile(
         compression as u8
     };
     encode_from_file(&input_s, &output_s, level, is_video != 0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_zstdStreamCreate(
+    _env: JNIEnv,
+    _this: JObject,
+) -> jlong {
+    match Decoder::new() {
+        Ok(decoder) => {
+            let boxed = Box::new(Mutex::new(ZstdStreamHandle { decoder }));
+            Box::into_raw(boxed) as jlong
+        }
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_zstdStreamDecompress(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    input: JByteArray,
+    input_len: jint,
+) -> jbyteArray {
+    if handle == 0 || input_len <= 0 {
+        return match env.byte_array_from_slice(&[]) {
+            Ok(a) => a.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        };
+    }
+    let in_bytes = match env.convert_byte_array(input) {
+        Ok(b) => b,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let valid_len = (input_len as usize).min(in_bytes.len());
+    let slice = &in_bytes[..valid_len];
+
+    let mutex = unsafe { &*(handle as *const Mutex<ZstdStreamHandle>) };
+    let mut guard = match mutex.lock() {
+        Ok(g) => g,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let mut total_out = Vec::with_capacity(valid_len * 2 + 65536);
+    let mut out_chunk = vec![0u8; 65536];
+    let mut offset = 0usize;
+
+    while offset < slice.len() {
+        match guard.decoder.run_on_buffers(&slice[offset..], &mut out_chunk) {
+            Ok(status) => {
+                if status.bytes_written > 0 {
+                    total_out.extend_from_slice(&out_chunk[..status.bytes_written]);
+                }
+                offset += status.bytes_read;
+                if status.bytes_read == 0 && status.bytes_written == 0 {
+                    break;
+                }
+            }
+            Err(_) => return std::ptr::null_mut(),
+        }
+    }
+
+    match env.byte_array_from_slice(&total_out) {
+        Ok(arr) => arr.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_zstdStreamFree(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    if handle != 0 {
+        unsafe {
+            let _ = Box::from_raw(handle as *mut Mutex<ZstdStreamHandle>);
+        }
+    }
 }

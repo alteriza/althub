@@ -1,7 +1,5 @@
 package com.althub.alteriza
 
-import java.io.File
-
 enum class SourceType {
     GITHUB,
     GDRIVE
@@ -24,13 +22,12 @@ data class RemoteMediaItem(
     val folderPath: String
 )
 
-data class PreparedVideo(
-    val file: File,
-    val width: Int,
-    val height: Int
-) {
-    val isLandscape: Boolean get() = width > height
-}
+data class ContainerHeaderInfo(
+    val headerOffset: Long,
+    val compression: Int,
+    val originalExt: String,
+    val originalSize: Long
+)
 
 data class InfoPost(
     val id: String,
