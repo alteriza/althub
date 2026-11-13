@@ -1,8 +1,6 @@
 name: Build AltHub Release APK
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -23,6 +21,11 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+            cmdline-tools-version: 12266719
+            accept-android-sdk-licenses: true
+            log-accepted-android-sdk-licenses: true
+            packages: platform-tools
 
       - name: Install Android NDK and Build Tools
         run: |

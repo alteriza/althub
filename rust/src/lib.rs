@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
-use zstd::stream::raw::{Decoder, Operation};
+use zstd::stream::raw::Decoder;
 
 const MAGIC_VIDEO: &[u8; 4] = b"SVCV";
 const MAGIC_IMAGE: &[u8; 4] = b"SICV";
