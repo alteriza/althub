@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
-use zstd::stream::raw::Decoder;
+use zstd::stream::raw::{Decoder, Operation};
 
 const MAGIC_VIDEO: &[u8; 4] = b"SVCV";
 const MAGIC_IMAGE: &[u8; 4] = b"SICV";
@@ -319,7 +319,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_resolveHostEndpoint(
             }
         }
     } else if lower.contains(&gf_host) {
-        let id = extract_segment_after(&trimmed, "/d/").unwrap_or("");
+        let id = extract_segment_after(&trimmed, "/d/").unwrap_or("").to_string();
         let api_base = obf_str!("https://api.gofile.io/contents/", 0x23);
         let wt = obf_str!("?wt=4fd6sg89d7s6", 0x24);
         HostResolution {
@@ -329,16 +329,17 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_resolveHostEndpoint(
             } else {
                 format!("{}{}{}", api_base, id, wt)
             },
-            file_id: id.into(),
+            file_id: id,
         }
     } else if lower.contains(&af_host) {
         let id = extract_segment_after(&trimmed, "/f/")
             .or_else(|| extract_segment_after(&trimmed, "/player/"))
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         HostResolution {
             host_type: "acefile".into(),
             resolved_url: trimmed,
-            file_id: id.into(),
+            file_id: id,
         }
     } else if lower.contains(&fd_host) {
         HostResolution {
@@ -476,7 +477,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_buildDriveDownloadUrl
 
 #[no_mangle]
 pub extern "system" fn Java_com_althub_alteriza_NativeCore_parseContainerHeaderBytes(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _this: JObject,
     input: JByteArray,
     input_len: jint,
@@ -611,7 +612,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_zstdStreamCreate(
 
 #[no_mangle]
 pub extern "system" fn Java_com_althub_alteriza_NativeCore_zstdStreamDecompress(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _this: JObject,
     handle: jlong,
     input: JByteArray,
