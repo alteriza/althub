@@ -122,10 +122,8 @@ import com.althub.alteriza.ui.theme.BbWhite
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-// <RNX_ALERT_TAG>
-private const val RNX_ALERT_TITLE = "RNX // HIDDEN SECTION"
-private const val RNX_ALERT_MESSAGE = "/* [ISI_PESAN_ALERT_RNX_DISINI] */"
-// </RNX_ALERT_TAG>
+private const val CORNX_ALERT_TITLE = "CORNX // HIDDEN SECTION"
+private const val CORNX_ALERT_MESSAGE = "/* [ADULT ONLY] */"
 
 private const val PREFS_NAME = "althub_prefs"
 private const val KEY_WELCOME_SHOWN = "welcome_popup_shown"
@@ -135,7 +133,7 @@ private enum class NavDestination(val label: String, val icon: ImageVector) {
     VIDEOS("VIDEOS", Icons.Default.Movie),
     PHOTOS("PHOTOS", Icons.Default.Image),
     INFO("INFO", Icons.Default.Campaign),
-    RNX("RNX", Icons.Default.Lock)
+    CORNX("CORNX", Icons.Default.Lock)
 }
 
 private enum class FeedChip(val label: String) {
@@ -145,7 +143,7 @@ private enum class FeedChip(val label: String) {
     INFO("INFO")
 }
 
-private enum class RnxChip(val label: String) {
+private enum class CORNXChip(val label: String) {
     ALL("ALL"),
     VIDEOS("VIDEOS"),
     PHOTOS("PHOTOS")
@@ -181,14 +179,14 @@ fun AltHubApp() {
 
     var currentTab by remember { mutableStateOf(NavDestination.FEED) }
     var activeFeedChip by remember { mutableStateOf(FeedChip.ALL) }
-    var activeRnxChip by remember { mutableStateOf(RnxChip.ALL) }
+    var activeCORNXChip by remember { mutableStateOf(CORNXChip.ALL) }
     var searchExpanded by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var initialLoading by remember { mutableStateOf(true) }
     var isRefreshing by remember { mutableStateOf(false) }
 
-    var rnxUnlocked by remember { mutableStateOf(false) }
-    var showRnxAlert by remember { mutableStateOf(false) }
+    var CORNXUnlocked by remember { mutableStateOf(false) }
+    var showCORNXAlert by remember { mutableStateOf(false) }
     var logoTapCount by remember { mutableIntStateOf(0) }
     var lastLogoTapMs by remember { mutableLongStateOf(0L) }
 
@@ -204,7 +202,7 @@ fun AltHubApp() {
         )
     }
 
-    var rnxDiscovery by remember {
+    var CORNXDiscovery by remember {
         mutableStateOf(
             DiscoveryResult(
                 mediaItems = emptyList(),
@@ -255,8 +253,8 @@ fun AltHubApp() {
             }
         }
 
-        if (rnxUnlocked) {
-            rnxDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+        if (CORNXUnlocked) {
+            CORNXDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
         }
 
         initialLoading = false
@@ -266,11 +264,11 @@ fun AltHubApp() {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) {
-                rnxUnlocked = false
-                showRnxAlert = false
+                CORNXUnlocked = false
+                showCORNXAlert = false
                 logoTapCount = 0
-                rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
-                if (currentTab == NavDestination.RNX) {
+                CORNXDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                if (currentTab == NavDestination.CORNX) {
                     currentTab = NavDestination.FEED
                 }
             }
@@ -314,12 +312,12 @@ fun AltHubApp() {
         }
     }
 
-    val rnxFilteredMedia = remember(rnxDiscovery.mediaItems, activeRnxChip, searchQuery) {
-        rnxDiscovery.mediaItems.filter { item ->
-            val matchChip = when (activeRnxChip) {
-                RnxChip.ALL -> true
-                RnxChip.VIDEOS -> item.kind == MediaKind.VIDEO
-                RnxChip.PHOTOS -> item.kind == MediaKind.IMAGE
+    val CORNXFilteredMedia = remember(CORNXDiscovery.mediaItems, activeCORNXChip, searchQuery) {
+        CORNXDiscovery.mediaItems.filter { item ->
+            val matchChip = when (activeCORNXChip) {
+                CORNXChip.ALL -> true
+                CORNXChip.VIDEOS -> item.kind == MediaKind.VIDEO
+                CORNXChip.PHOTOS -> item.kind == MediaKind.IMAGE
             }
             val matchQuery = searchQuery.isBlank() ||
                 item.title.contains(searchQuery, true) ||
@@ -380,7 +378,7 @@ fun AltHubApp() {
                 .windowInsetsPadding(WindowInsets.safeDrawing)
         ) {
             SocialTopBar(
-                rnxUnlocked = rnxUnlocked,
+                CORNXUnlocked = CORNXUnlocked,
                 searchExpanded = searchExpanded,
                 searchQuery = searchQuery,
                 onLogoTap = {
@@ -389,20 +387,20 @@ fun AltHubApp() {
                     lastLogoTapMs = now
                     if (logoTapCount >= 5) {
                         logoTapCount = 0
-                        if (!rnxUnlocked) {
-                            rnxUnlocked = true
-                            showRnxAlert = true
-                            currentTab = NavDestination.RNX
+                        if (!CORNXUnlocked) {
+                            CORNXUnlocked = true
+                            showCORNXAlert = true
+                            currentTab = NavDestination.CORNX
                             scope.launch {
                                 isRefreshing = true
-                                rnxDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+                                CORNXDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
                                 isRefreshing = false
                             }
                         } else {
-                            rnxUnlocked = false
-                            showRnxAlert = false
-                            rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
-                            if (currentTab == NavDestination.RNX) {
+                            CORNXUnlocked = false
+                            showCORNXAlert = false
+                            CORNXDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                            if (currentTab == NavDestination.CORNX) {
                                 currentTab = NavDestination.FEED
                             }
                         }
@@ -608,13 +606,13 @@ fun AltHubApp() {
                         }
                     }
 
-                    currentTab == NavDestination.RNX -> {
+                    currentTab == NavDestination.CORNX -> {
                         LazyColumn(
                             contentPadding = PaddingValues(14.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
-                            item(key = "rnx_header_banner") {
+                            item(key = "CORNX_header_banner") {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -631,7 +629,7 @@ fun AltHubApp() {
                                     Spacer(Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "RNX // PRIVATE STREAM",
+                                            text = "CORNX // PRIVATE STREAM",
                                             color = BbWhite,
                                             fontFamily = FontFamily.Monospace,
                                             fontWeight = FontWeight.Bold,
@@ -648,43 +646,43 @@ fun AltHubApp() {
                                         text = "HIDE",
                                         primary = false,
                                         onClick = {
-                                            rnxUnlocked = false
-                                            rnxDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                                            CORNXUnlocked = false
+                                            CORNXDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
                                             currentTab = NavDestination.FEED
                                         }
                                     )
                                 }
                             }
 
-                            item(key = "rnx_chips") {
+                            item(key = "CORNX_chips") {
                                 LazyRow(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    items(RnxChip.entries) { chip ->
+                                    items(CORNXChip.entries) { chip ->
                                         CubicFilterChip(
                                             label = chip.label,
-                                            selected = activeRnxChip == chip,
-                                            onClick = { activeRnxChip = chip }
+                                            selected = activeCORNXChip == chip,
+                                            onClick = { activeCORNXChip = chip }
                                         )
                                     }
                                 }
                             }
 
-                            if (rnxFilteredMedia.isEmpty() && rnxDiscovery.infoPosts.isEmpty()) {
-                                item(key = "empty_rnx") {
+                            if (CORNXFilteredMedia.isEmpty() && CORNXDiscovery.infoPosts.isEmpty()) {
+                                item(key = "empty_CORNX") {
                                     EmptyFeedBox(
-                                        title = "RNX STREAM EMPTY",
-                                        subtitle = rnxDiscovery.errorMessage ?: "Pull down to refresh"
+                                        title = "CORNX STREAM EMPTY",
+                                        subtitle = CORNXDiscovery.errorMessage ?: "Pull down to refresh"
                                     )
                                 }
                             } else {
-                                items(rnxFilteredMedia, key = { "rnx_${it.id}" }) { media ->
+                                items(CORNXFilteredMedia, key = { "CORNX_${it.id}" }) { media ->
                                     SocialStreamPostCard(
                                         item = media,
                                         onOpen = { openMedia(media) }
                                     )
                                 }
-                                items(rnxDiscovery.infoPosts, key = { "rnx_post_${it.id}" }) { post ->
+                                items(CORNXDiscovery.infoPosts, key = { "CORNX_post_${it.id}" }) { post ->
                                     SocialAnnouncementCard(post = post)
                                 }
                             }
@@ -702,16 +700,16 @@ fun AltHubApp() {
 
             CubicBottomNavBar(
                 current = currentTab,
-                rnxUnlocked = rnxUnlocked,
+                CORNXUnlocked = CORNXUnlocked,
                 videoCount = allVideos.size,
                 photoCount = allPhotos.size,
                 infoCount = allPosts.size,
-                rnxCount = rnxDiscovery.mediaItems.size,
+                CORNXCount = CORNXDiscovery.mediaItems.size,
                 onSelect = { currentTab = it }
             )
         }
 
-        if (showRnxAlert) {
+        if (showCORNXAlert) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -740,7 +738,7 @@ fun AltHubApp() {
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = RNX_ALERT_TITLE,
+                            text = CORNX_ALERT_TITLE,
                             color = BbWhite,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
@@ -755,7 +753,7 @@ fun AltHubApp() {
                             .background(BbBorder)
                     )
                     Text(
-                        text = RNX_ALERT_MESSAGE,
+                        text = CORNX_ALERT_MESSAGE,
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
@@ -766,10 +764,10 @@ fun AltHubApp() {
                         horizontalArrangement = Arrangement.End
                     ) {
                         CubicActionButton(
-                            text = "ENTER RNX",
+                            text = "ENTER CORNX",
                             icon = Icons.Default.NorthEast,
                             primary = true,
-                            onClick = { showRnxAlert = false }
+                            onClick = { showCORNXAlert = false }
                         )
                     }
                 }
@@ -949,7 +947,7 @@ private fun TechnicalGridBackdrop() {
 
 @Composable
 private fun SocialTopBar(
-    rnxUnlocked: Boolean,
+    CORNXUnlocked: Boolean,
     searchExpanded: Boolean,
     searchQuery: String,
     onLogoTap: () -> Unit,
@@ -981,7 +979,7 @@ private fun SocialTopBar(
                 Box(
                     modifier = Modifier
                         .size(12.dp)
-                        .background(if (rnxUnlocked) BbOrange else BbBlack)
+                        .background(if (CORNXUnlocked) BbOrange else BbBlack)
                 )
             }
             Spacer(Modifier.width(10.dp))
@@ -1656,18 +1654,18 @@ private fun SocialAnnouncementCard(
 @Composable
 private fun CubicBottomNavBar(
     current: NavDestination,
-    rnxUnlocked: Boolean,
+    CORNXUnlocked: Boolean,
     videoCount: Int,
     photoCount: Int,
     infoCount: Int,
-    rnxCount: Int,
+    CORNXCount: Int,
     onSelect: (NavDestination) -> Unit
 ) {
-    val destinations = remember(rnxUnlocked) {
-        if (rnxUnlocked) {
+    val destinations = remember(CORNXUnlocked) {
+        if (CORNXUnlocked) {
             NavDestination.entries
         } else {
-            NavDestination.entries.filter { it != NavDestination.RNX }
+            NavDestination.entries.filter { it != NavDestination.CORNX }
         }
     }
 
@@ -1685,7 +1683,7 @@ private fun CubicBottomNavBar(
                 NavDestination.VIDEOS -> " [$videoCount]"
                 NavDestination.PHOTOS -> " [$photoCount]"
                 NavDestination.INFO -> " [$infoCount]"
-                NavDestination.RNX -> " [$rnxCount]"
+                NavDestination.CORNX -> " [$CORNXCount]"
             }
             Box(
                 modifier = Modifier
@@ -1696,7 +1694,7 @@ private fun CubicBottomNavBar(
                         1.dp,
                         when {
                             selected -> BbWhite
-                            dest == NavDestination.RNX -> BbOrange
+                            dest == NavDestination.CORNX -> BbOrange
                             else -> BbBorder
                         }
                     )
@@ -1713,7 +1711,7 @@ private fun CubicBottomNavBar(
                             contentDescription = dest.label,
                             tint = when {
                                 selected -> BbBlack
-                                dest == NavDestination.RNX -> BbOrange
+                                dest == NavDestination.CORNX -> BbOrange
                                 else -> BbMuted
                             },
                             modifier = Modifier.size(15.dp)
@@ -1732,7 +1730,7 @@ private fun CubicBottomNavBar(
                         text = "${dest.label}$badge",
                         color = when {
                             selected -> BbBlack
-                            dest == NavDestination.RNX -> BbOrange
+                            dest == NavDestination.CORNX -> BbOrange
                             else -> BbMuted
                         },
                         fontFamily = FontFamily.Monospace,
