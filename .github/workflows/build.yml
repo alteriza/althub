@@ -1,0 +1,178 @@
+name: Build AltHub Release APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+            cmdline-tools-version: 12266719
+            accept-android-sdk-licenses: true
+            log-accepted-android-sdk-licenses: true
+            packages: platform-tools
+
+      - name: Install Android NDK and Build Tools
+        run: |
+          sdkmanager "ndk;26.3.11579264" "platforms;android-35" "build-tools;35.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> $GITHUB_ENV
+
+      - name: Setup Rust Toolchain with Android Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Install cargo-ndk and ImageMagick
+        run: |
+          cargo install cargo-ndk
+          sudo apt-get update && sudo apt-get install -y imagemagick
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate App Icon Mipmaps from root icon.png
+        run: |
+          if [ ! -f "icon.png" ]; then
+            echo "ERROR: icon.png not found in repository root!"
+            exit 1
+          fi
+          mkdir -p app/src/main/res/mipmap-mdpi
+          mkdir -p app/src/main/res/mipmap-hdpi
+          mkdir -p app/src/main/res/mipmap-xhdpi
+          mkdir -p app/src/main/res/mipmap-xxhdpi
+          mkdir -p app/src/main/res/mipmap-xxxhdpi
+
+          convert icon.png -resize 48x48 app/src/main/res/mipmap-mdpi/ic_launcher.png
+          convert icon.png -resize 48x48 app/src/main/res/mipmap-mdpi/ic_launcher_round.png
+
+          convert icon.png -resize 72x72 app/src/main/res/mipmap-hdpi/ic_launcher.png
+          convert icon.png -resize 72x72 app/src/main/res/mipmap-hdpi/ic_launcher_round.png
+
+          convert icon.png -resize 96x96 app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          convert icon.png -resize 96x96 app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+
+          convert icon.png -resize 144x144 app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          convert icon.png -resize 144x144 app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+
+          convert icon.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          convert icon.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+
+      - name: Prepare RSA Signing Keystore & Summary
+        env:
+          SECRET_KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          VAR_KEY_ALIAS: ${{ vars.KEY_ALIAS }}
+        run: |
+          KS_PATH="$RUNNER_TEMP/release.jks"
+          ALIAS="${VAR_KEY_ALIAS:-althub}"
+          if [ -n "$SECRET_KEYSTORE_B64" ]; then
+            echo "$SECRET_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > "$KS_PATH"
+            KS_PASS="$SECRET_KEYSTORE_PASS"
+            KEY_PASS="${SECRET_KEY_PASS:-$SECRET_KEYSTORE_PASS}"
+            SIGN_MODE="Loaded from Repository Secret (KEYSTORE_BASE64)"
+          else
+            KS_PASS=$(openssl rand -hex 16)
+            KEY_PASS="$KS_PASS"
+            keytool -genkeypair -v \
+              -keystore "$KS_PATH" \
+              -storetype PKCS12 \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 10000 \
+              -alias "$ALIAS" \
+              -storepass "$KS_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=AltHub, OU=alteriza, O=AltHub, L=ID, S=ID, C=ID"
+            SIGN_MODE="Generated New 4096-bit RSA Keystore"
+          fi
+
+          echo "KEYSTORE_FILE=$KS_PATH" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=$KS_PASS" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$ALIAS" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=$KEY_PASS" >> $GITHUB_ENV
+
+          keytool -exportcert -rfc -keystore "$KS_PATH" -alias "$ALIAS" -storepass "$KS_PASS" > "$RUNNER_TEMP/cert.pem"
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -pubkey -noout > "$RUNNER_TEMP/rsa_pub.pem"
+          FINGERPRINTS=$(keytool -list -v -keystore "$KS_PATH" -alias "$ALIAS" -storepass "$KS_PASS" | grep -E "SHA1:|SHA256:|Signature algorithm name:|Valid from:")
+
+          {
+            echo "## APK RSA Signing Summary"
+            echo ""
+            echo "- **Status:** $SIGN_MODE"
+            echo "- **Key Algorithm:** RSA 4096-bit"
+            echo "- **Key Alias (\`vars.KEY_ALIAS\`):** \`$ALIAS\`"
+            echo ""
+            echo "### Certificate Fingerprints"
+            echo '```text'
+            echo "$FINGERPRINTS"
+            echo '```'
+            echo ""
+            echo "### RSA Public Key (PEM)"
+            echo '```pem'
+            cat "$RUNNER_TEMP/rsa_pub.pem"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+          if [ -z "$SECRET_KEYSTORE_B64" ]; then
+            KS_B64=$(base64 -w 0 "$KS_PATH")
+            {
+              echo ""
+              echo "### GitHub Actions Secrets & Variables (Copy to Repo Settings)"
+              echo "| Type | Name | Value |"
+              echo "| :--- | :--- | :--- |"
+              echo "| Variable | \`KEY_ALIAS\` | \`$ALIAS\` |"
+              echo "| Secret | \`KEYSTORE_PASSWORD\` | \`$KS_PASS\` |"
+              echo "| Secret | \`KEY_PASSWORD\` | \`$KEY_PASS\` |"
+              echo ""
+              echo "<details><summary><strong>Secret: KEYSTORE_BASE64 (Click to expand)</strong></summary>"
+              echo ""
+              echo '```text'
+              echo "$KS_B64"
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Build Native Rust Core (libalthub_core.so) and Release APK
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          chmod +x gradlew || gradle wrapper --gradle-version 8.9
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Rename Release APK
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk AltHub-v1.0.${{ github.run_number }}.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AltHub-Release-APK
+          path: AltHub-v1.0.${{ github.run_number }}.apk
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: AltHub v1.0.${{ github.run_number }}
+          files: AltHub-v1.0.${{ github.run_number }}.apk
+
+      - name: Cleanup Temporary Keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/cert.pem" "$RUNNER_TEMP/rsa_pub.pem"
