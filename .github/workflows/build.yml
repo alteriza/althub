@@ -72,6 +72,83 @@ jobs:
           convert icon.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
           convert icon.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
 
+      - name: Prepare RSA Signing Keystore & Summary
+        env:
+          SECRET_KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          VAR_KEY_ALIAS: ${{ vars.KEY_ALIAS }}
+        run: |
+          KS_PATH="$RUNNER_TEMP/release.jks"
+          ALIAS="${VAR_KEY_ALIAS:-althub}"
+          if [ -n "$SECRET_KEYSTORE_B64" ]; then
+            echo "$SECRET_KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > "$KS_PATH"
+            KS_PASS="$SECRET_KEYSTORE_PASS"
+            KEY_PASS="${SECRET_KEY_PASS:-$SECRET_KEYSTORE_PASS}"
+            SIGN_MODE="Loaded from Repository Secret (KEYSTORE_BASE64)"
+          else
+            KS_PASS=$(openssl rand -hex 16)
+            KEY_PASS="$KS_PASS"
+            keytool -genkeypair -v \
+              -keystore "$KS_PATH" \
+              -storetype PKCS12 \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 10000 \
+              -alias "$ALIAS" \
+              -storepass "$KS_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=AltHub, OU=alteriza, O=AltHub, L=ID, S=ID, C=ID"
+            SIGN_MODE="Generated New 4096-bit RSA Keystore"
+          fi
+
+          echo "KEYSTORE_FILE=$KS_PATH" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=$KS_PASS" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$ALIAS" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=$KEY_PASS" >> $GITHUB_ENV
+
+          keytool -exportcert -rfc -keystore "$KS_PATH" -alias "$ALIAS" -storepass "$KS_PASS" > "$RUNNER_TEMP/cert.pem"
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -pubkey -noout > "$RUNNER_TEMP/rsa_pub.pem"
+          FINGERPRINTS=$(keytool -list -v -keystore "$KS_PATH" -alias "$ALIAS" -storepass "$KS_PASS" | grep -E "SHA1:|SHA256:|Signature algorithm name:|Valid from:")
+
+          {
+            echo "## APK RSA Signing Summary"
+            echo ""
+            echo "- **Status:** $SIGN_MODE"
+            echo "- **Key Algorithm:** RSA 4096-bit"
+            echo "- **Key Alias (\`vars.KEY_ALIAS\`):** \`$ALIAS\`"
+            echo ""
+            echo "### Certificate Fingerprints"
+            echo '```text'
+            echo "$FINGERPRINTS"
+            echo '```'
+            echo ""
+            echo "### RSA Public Key (PEM)"
+            echo '```pem'
+            cat "$RUNNER_TEMP/rsa_pub.pem"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+          if [ -z "$SECRET_KEYSTORE_B64" ]; then
+            KS_B64=$(base64 -w 0 "$KS_PATH")
+            {
+              echo ""
+              echo "### GitHub Actions Secrets & Variables (Copy to Repo Settings)"
+              echo "| Type | Name | Value |"
+              echo "| :--- | :--- | :--- |"
+              echo "| Variable | \`KEY_ALIAS\` | \`$ALIAS\` |"
+              echo "| Secret | \`KEYSTORE_PASSWORD\` | \`$KS_PASS\` |"
+              echo "| Secret | \`KEY_PASSWORD\` | \`$KEY_PASS\` |"
+              echo ""
+              echo "<details><summary><strong>Secret: KEYSTORE_BASE64 (Click to expand)</strong></summary>"
+              echo ""
+              echo '```text'
+              echo "$KS_B64"
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Build Native Rust Core (libalthub_core.so) and Release APK
         env:
           BUILD_NUMBER: ${{ github.run_number }}
@@ -95,3 +172,7 @@ jobs:
           tag_name: v1.0.${{ github.run_number }}
           name: AltHub v1.0.${{ github.run_number }}
           files: AltHub-v1.0.${{ github.run_number }}.apk
+
+      - name: Cleanup Temporary Keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/cert.pem" "$RUNNER_TEMP/rsa_pub.pem"

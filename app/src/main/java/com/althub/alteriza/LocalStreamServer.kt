@@ -5,6 +5,9 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.BufferedReader
 import java.io.EOFException
+import java.io.File
+import java.io.FileInputStream
+import java.io.RandomAccessFile
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -22,6 +25,8 @@ import java.util.concurrent.Executors
 object LocalStreamServer {
     private val itemsById = ConcurrentHashMap<String, RemoteMediaItem>()
     private val headersById = ConcurrentHashMap<String, ContainerHeaderInfo>()
+    private val localFilesById = ConcurrentHashMap<String, File>()
+    private val localHeadersById = ConcurrentHashMap<String, ContainerHeaderInfo>()
     private val executor = Executors.newCachedThreadPool()
 
     @Volatile
@@ -60,6 +65,14 @@ object LocalStreamServer {
         return "http://127.0.0.1:$p/stream?id=${item.id}"
     }
 
+    fun getLocalStreamUrl(item: RemoteMediaItem, localFile: File): String {
+        itemsById[item.id] = item
+        localFilesById[item.id] = localFile
+        localHeadersById.remove(item.id)
+        val p = ensureStarted()
+        return "http://127.0.0.1:$p/stream?id=${item.id}&local=1"
+    }
+
     fun parseContainerHeaderFromStream(input: InputStream): ContainerHeaderInfo {
         val prefix = readExactBytes(input, 8)
         val headerLen = ByteBuffer.wrap(prefix, 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
@@ -81,6 +94,157 @@ object LocalStreamServer {
             originalExt = obj.optString("original_ext", "mp4").ifBlank { "mp4" },
             originalSize = obj.optLong("original_size", -1L)
         )
+    }
+
+    private fun resolveLocalHeader(id: String, file: File): ContainerHeaderInfo {
+        localHeadersById[id]?.let { return it }
+        val extFallback = file.extension.lowercase().let {
+            if (it == "vcv" || it == "icv" || it.isBlank()) "mp4" else it
+        }
+        val info = BufferedInputStream(FileInputStream(file), 16_384).use { bis ->
+            bis.mark(16)
+            val magic = ByteArray(4)
+            val n = bis.read(magic)
+            val mStr = if (n == 4) String(magic, Charsets.US_ASCII) else ""
+            bis.reset()
+            if (mStr == "SVCV" || mStr == "SICV") {
+                parseContainerHeaderFromStream(bis)
+            } else {
+                ContainerHeaderInfo(
+                    isContainer = false,
+                    headerOffset = 0L,
+                    compression = 0,
+                    originalExt = extFallback,
+                    originalSize = file.length()
+                )
+            }
+        }
+        localHeadersById[id] = info
+        return info
+    }
+
+    private fun serveLocalUncompressedRange(
+        file: File,
+        info: ContainerHeaderInfo,
+        mime: String,
+        method: String,
+        rangeHeader: String?,
+        out: OutputStream
+    ) {
+        val totalSize = (file.length() - info.headerOffset).coerceAtLeast(0L)
+        if (totalSize <= 0L) return
+        var start = 0L
+        var end = totalSize - 1L
+        var isPartial = false
+
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=", ignoreCase = true)) {
+            val spec = rangeHeader.substringAfter('=').trim()
+            val dashIdx = spec.indexOf('-')
+            if (dashIdx >= 0) {
+                val startStr = spec.substring(0, dashIdx).trim()
+                val endStr = spec.substring(dashIdx + 1).trim()
+                if (startStr.isNotEmpty()) {
+                    start = startStr.toLongOrNull() ?: 0L
+                    end = if (endStr.isNotEmpty()) {
+                        endStr.toLongOrNull() ?: end
+                    } else {
+                        totalSize - 1L
+                    }
+                    isPartial = true
+                }
+            }
+        }
+
+        start = start.coerceIn(0L, totalSize - 1L)
+        end = if (end < start) totalSize - 1L else end.coerceAtMost(totalSize - 1L)
+        val contentLength = end - start + 1L
+
+        val sb = StringBuilder()
+        if (isPartial) {
+            sb.append("HTTP/1.1 206 Partial Content\r\n")
+            sb.append("Content-Range: bytes $start-$end/$totalSize\r\n")
+        } else {
+            sb.append("HTTP/1.1 200 OK\r\n")
+        }
+        sb.append("Content-Type: $mime\r\n")
+        sb.append("Accept-Ranges: bytes\r\n")
+        sb.append("Content-Length: $contentLength\r\n")
+        sb.append("Connection: close\r\n\r\n")
+        out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        out.flush()
+
+        if (method == "HEAD") return
+
+        RandomAccessFile(file, "r").use { raf ->
+            raf.seek(info.headerOffset + start)
+            val buf = ByteArray(65_536)
+            var remaining = contentLength
+            while (remaining > 0L) {
+                val toRead = minOf(buf.size.toLong(), remaining).toInt()
+                val n = raf.read(buf, 0, toRead)
+                if (n <= 0) break
+                out.write(buf, 0, n)
+                remaining -= n.toLong()
+            }
+            out.flush()
+        }
+    }
+
+    private fun serveLocalCompressedStream(
+        file: File,
+        info: ContainerHeaderInfo,
+        mime: String,
+        method: String,
+        rangeHeader: String?,
+        out: OutputStream
+    ) {
+        var skipBytes = 0L
+        var isPartial = false
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=", ignoreCase = true)) {
+            val startStr = rangeHeader.substringAfter('=').substringBefore('-').trim()
+            val reqStart = startStr.toLongOrNull() ?: 0L
+            if (reqStart > 0L) {
+                skipBytes = reqStart
+                isPartial = true
+            }
+        }
+
+        val totalSize = info.originalSize
+        val sb = StringBuilder()
+        if (isPartial && totalSize > skipBytes) {
+            val end = totalSize - 1L
+            sb.append("HTTP/1.1 206 Partial Content\r\n")
+            sb.append("Content-Range: bytes $skipBytes-$end/$totalSize\r\n")
+            sb.append("Content-Length: ${totalSize - skipBytes}\r\n")
+        } else {
+            sb.append("HTTP/1.1 200 OK\r\n")
+            if (totalSize > 0L) {
+                sb.append("Content-Length: $totalSize\r\n")
+            }
+        }
+        sb.append("Content-Type: $mime\r\n")
+        sb.append("Accept-Ranges: bytes\r\n")
+        sb.append("Connection: close\r\n\r\n")
+        out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        out.flush()
+
+        if (method == "HEAD") return
+
+        BufferedInputStream(FileInputStream(file), 65_536).use { rawIn ->
+            skipFully(rawIn, info.headerOffset)
+            ZstdDecompressInputStream(rawIn).use { zstdIn ->
+                if (skipBytes > 0L) {
+                    skipFully(zstdIn, skipBytes)
+                }
+                val buf = ByteArray(65_536)
+                while (true) {
+                    val n = zstdIn.read(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                }
+                out.flush()
+            }
+        }
     }
 
     private fun resolveHeader(item: RemoteMediaItem): ContainerHeaderInfo {
@@ -157,11 +321,29 @@ object LocalStreamServer {
                 }
 
                 val id = target.substringAfter("id=", "").substringBefore('&')
+                val isLocalReq = target.contains("local=1")
                 val item = itemsById[id]
                 val out = BufferedOutputStream(client.getOutputStream(), 65_536)
                 if (item == null) {
                     out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                     out.flush()
+                    return
+                }
+
+                val localFile = if (isLocalReq) {
+                    localFilesById[id]?.takeIf { it.exists() && it.isFile }
+                } else {
+                    null
+                }
+
+                if (localFile != null) {
+                    val headerInfo = resolveLocalHeader(id, localFile)
+                    val mime = mimeTypeForExt(headerInfo.originalExt)
+                    if (!headerInfo.isContainer || headerInfo.compression == 0) {
+                        serveLocalUncompressedRange(localFile, headerInfo, mime, method, rangeValue, out)
+                    } else {
+                        serveLocalCompressedStream(localFile, headerInfo, mime, method, rangeValue, out)
+                    }
                     return
                 }
 

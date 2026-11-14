@@ -15,6 +15,7 @@ object AppStorageManager {
     private const val KEY_HW_ACCEL = "hw_acceleration"
     private const val KEY_DL_FORMAT = "download_format_pref"
     private const val KEY_HISTORY = "media_history_json"
+    private const val KEY_DOWNLOAD_MAP = "downloaded_item_map_json"
 
     fun isHwAccelerationEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -40,6 +41,64 @@ object AppStorageManager {
             .edit()
             .putString(KEY_DL_FORMAT, pref.name)
             .apply()
+    }
+
+    fun recordDownloadedItem(context: Context, itemId: String, filePath: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val mapObj = runCatching {
+            JSONObject(prefs.getString(KEY_DOWNLOAD_MAP, "{}") ?: "{}")
+        }.getOrDefault(JSONObject())
+        mapObj.put(itemId, filePath)
+        prefs.edit().putString(KEY_DOWNLOAD_MAP, mapObj.toString()).apply()
+    }
+
+    fun removeDownloadedItemRecord(context: Context, filePath: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val mapObj = runCatching {
+            JSONObject(prefs.getString(KEY_DOWNLOAD_MAP, "{}") ?: "{}")
+        }.getOrDefault(JSONObject())
+        val toRemove = mutableListOf<String>()
+        val keys = mapObj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            if (mapObj.optString(k) == filePath) toRemove.add(k)
+        }
+        toRemove.forEach { mapObj.remove(it) }
+        prefs.edit().putString(KEY_DOWNLOAD_MAP, mapObj.toString()).apply()
+    }
+
+    fun findDownloadedFile(context: Context, item: RemoteMediaItem): File? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val mapObj = runCatching {
+            JSONObject(prefs.getString(KEY_DOWNLOAD_MAP, "{}") ?: "{}")
+        }.getOrNull()
+        val mappedPath = mapObj?.optString(item.id, "")?.ifBlank { null }
+        if (mappedPath != null) {
+            val f = File(mappedPath)
+            if (f.exists() && f.isFile && f.length() > 0L) return f
+        }
+        val dir = getDefaultDownloadDir(context)
+        val files = dir.listFiles() ?: return null
+        val targetBase = sanitizeFileName(
+            item.fileName.substringBeforeLast('.', item.fileName)
+        ).lowercase()
+        if (targetBase.isBlank()) return null
+        val validExts = if (item.kind == MediaKind.VIDEO) {
+            setOf("vcv", "mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp", "ts")
+        } else {
+            setOf("icv", "png", "jpg", "jpeg", "webp", "gif", "bmp")
+        }
+        val matched = files.firstOrNull { f ->
+            if (!f.isFile || f.length() <= 0L) return@firstOrNull false
+            val ext = f.extension.lowercase()
+            if (ext !in validExts) return@firstOrNull false
+            val base = f.nameWithoutExtension.lowercase()
+            base == targetBase || base.startsWith("${targetBase}_")
+        }
+        if (matched != null) {
+            recordDownloadedItem(context, item.id, matched.absolutePath)
+        }
+        return matched
     }
 
     fun getDefaultDownloadDir(context: Context): File {
@@ -257,6 +316,7 @@ object AppStorageManager {
                 dest
             }
 
+            recordDownloadedItem(context, item.id, finalFile.absolutePath)
             finalFile
         }
     }
