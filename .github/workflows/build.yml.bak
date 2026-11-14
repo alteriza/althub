@@ -19,25 +19,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK (Exclude legacy tools)
+      - name: Setup Android SDK (Tanpa package 'tools')
         uses: android-actions/setup-android@v3
         with:
-          cmdline-tools-version: 16.0
-          packages: >
+          cmdline-tools-version: latest
+          packages: |
             platform-tools
-            platforms;android-34
-            build-tools;34.0.0
-            ndk;26.3.11579264
+            platforms;android-35
+            build-tools;35.0.0
+            ndk;27.2.12479018
+            cmdline-tools;latest
 
-      - name: Setup Rust Toolchain
+      - name: Setup Rust & Android Targets (ARMv7 & ARMv8)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-linux-androideabi,aarch64-linux-android
 
       - name: Install cargo-ndk
-        uses: taiki-e/install-action@cargo-ndk
+        run: cargo install cargo-ndk
 
-      - name: Build Native Core (libalthub_core.so)
+      - name: Build Native Rust Library (libalthub_core.so)
         working-directory: rust
         run: |
           cargo ndk \
@@ -50,11 +51,11 @@ jobs:
       - name: Grant Execute Permission for Gradle
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AltHub-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: AltHub-Release
+          path: app/build/outputs/apk/release/*.apk

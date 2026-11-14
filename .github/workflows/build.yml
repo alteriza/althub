@@ -19,17 +19,12 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK (Tanpa package 'tools')
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: latest
-          packages: |
-            platform-tools
-            platforms;android-35
-            build-tools;35.0.0
-            ndk;27.2.12479018
-            cmdline-tools;latest
-
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018
+          
       - name: Setup Rust & Android Targets (ARMv7 & ARMv8)
         uses: dtolnay/rust-toolchain@stable
         with:
