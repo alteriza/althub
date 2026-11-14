@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zstd::bulk;
-use zstd::stream::raw::Decoder;
+use zstd::stream::raw::{Decoder, Operation};
 
 const MAGIC_VIDEO: &[u8; 4] = b"SVCV";
 const MAGIC_IMAGE: &[u8; 4] = b"SICV";
