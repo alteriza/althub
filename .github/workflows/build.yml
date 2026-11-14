@@ -1,24 +1,34 @@
-name: Build AltHub APK
+name: Build & Release AltHub APK
 
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+permissions:
+  contents: write
 
+jobs:
+  # =========================================================================
+  # JOB 1 (PARALEL): Generate seluruh mipmap DPI & logo dari icon.png
+  # =========================================================================
+  generate-icons:
+    name: Generate Mipmap Icons
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Generate App Icons from icon.png
+      - name: Generate Mipmap DPI from icon.png
         run: |
-          python3 -m pip install --quiet --break-system-packages pillow || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil
           python3 - << 'EOF'
           import os
           from PIL import Image, ImageDraw
+
+          if not os.path.exists("icon.png"):
+              raise FileNotFoundError("icon.png tidak ditemukan di root repository!")
 
           src = Image.open("icon.png").convert("RGBA")
           os.makedirs("app/src/main/res/drawable", exist_ok=True)
@@ -46,6 +56,110 @@ jobs:
               round_img.save(f"{out_dir}/ic_launcher_round.png")
           EOF
 
+      - name: Pass Generated Icons to Next Job
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            app/src/main/res/drawable/ic_althub_logo.png
+            app/src/main/res/mipmap-*
+          key: althub-icons-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # =========================================================================
+  # JOB 2 (PARALEL MATRIX): Compile Rust libalthub_core.so (ARMv7 & ARMv8)
+  # =========================================================================
+  build-rust:
+    name: Build Rust (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - abi: arm64-v8a
+            rust_target: aarch64-linux-android
+          - abi: armeabi-v7a
+            rust_target: armv7-linux-androideabi
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: latest
+          packages: ndk;27.2.12479018
+
+      - name: Setup Rust (${{ matrix.rust_target }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Cargo & cargo-ndk
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: cargo-${{ matrix.abi }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.abi }}-
+
+      - name: Install cargo-ndk if Missing
+        run: |
+          if ! command -v cargo-ndk &> /dev/null; then
+            cargo install cargo-ndk
+          fi
+
+      - name: Compile libalthub_core.so (${{ matrix.abi }})
+        working-directory: rust
+        run: |
+          cargo ndk \
+            -t ${{ matrix.abi }} \
+            --platform 26 \
+            -o ../app/src/main/jniLibs \
+            build --release
+
+      - name: Pass Compiled .so to Next Job
+        uses: actions/cache/save@v4
+        with:
+          path: app/src/main/jniLibs/${{ matrix.abi }}/libalthub_core.so
+          key: althub-jni-${{ matrix.abi }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # =========================================================================
+  # JOB 3 (SEQUENCE AKHIR): Assemble APK, Sign & Langsung Upload ke Release
+  # =========================================================================
+  build-sign-release:
+    name: Build, Sign & Publish Release
+    runs-on: ubuntu-latest
+    needs: [ generate-icons, build-rust ]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Restore Generated Icons
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            app/src/main/res/drawable/ic_althub_logo.png
+            app/src/main/res/mipmap-*
+          key: althub-icons-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Restore Compiled Rust ARM64
+        uses: actions/cache/restore@v4
+        with:
+          path: app/src/main/jniLibs/arm64-v8a/libalthub_core.so
+          key: althub-jni-arm64-v8a-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Restore Compiled Rust ARMv7
+        uses: actions/cache/restore@v4
+        with:
+          path: app/src/main/jniLibs/armeabi-v7a/libalthub_core.so
+          key: althub-jni-armeabi-v7a-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -56,15 +170,7 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: latest
-          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018
-
-      - name: Setup Rust & Android Targets (ARMv7 & ARMv8)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: armv7-linux-androideabi,aarch64-linux-android
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -72,10 +178,137 @@ jobs:
           gradle-version: 8.11.1
 
       - name: Build Release APK
-        run: gradle assembleRelease
+        run: |
+          if [ -f "app/src/main/jniLibs/arm64-v8a/libalthub_core.so" ] && [ -f "app/src/main/jniLibs/armeabi-v7a/libalthub_core.so" ]; then
+            gradle assembleRelease -x cargoBuild || gradle assembleRelease
+          else
+            gradle assembleRelease
+          fi
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AltHub-Release
-          path: app/build/outputs/apk/release/*.apk
+      # ---------------------------------------------------------------------
+      # SIGNING KEY: Generate baru jika secret kosong, atau pakai dari Secret
+      # ---------------------------------------------------------------------
+      - name: Generate Signing Keystore (No Secret Found)
+        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 == '' }}
+        run: |
+          GEN_ALIAS="althub"
+          GEN_PASS=$(openssl rand -hex 12)
+          keytool -genkeypair -v \
+            -keystore release-keystore.jks \
+            -alias "$GEN_ALIAS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass "$GEN_PASS" \
+            -keypass "$GEN_PASS" \
+            -dname "CN=AltHub, OU=Alteriza, O=AltHub, L=Semarang, ST=Central Java, C=ID"
+
+          KEY_B64=$(base64 -w 0 release-keystore.jks)
+          {
+            echo "KEY_SOURCE=AUTO-GENERATED (Simpan ke Secrets agar update APK berikutnya kompatibel)"
+            echo "ACTIVE_KEY_ALIAS=$GEN_ALIAS"
+            echo "ACTIVE_STORE_PASS=$GEN_PASS"
+            echo "ACTIVE_KEY_PASS=$GEN_PASS"
+            echo "ACTIVE_KEYSTORE_B64<<EOF"
+            echo "$KEY_B64"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Load Signing Keystore from Secrets
+        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
+        env:
+          SECRET_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SECRET_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SECRET_STORE_PASS: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$SECRET_B64" | tr -d '\r\n ' | base64 -d > release-keystore.jks
+          RESOLVED_ALIAS="${SECRET_ALIAS:-althub}"
+          RESOLVED_STORE_PASS="${SECRET_STORE_PASS}"
+          RESOLVED_KEY_PASS="${SECRET_KEY_PASS:-$RESOLVED_STORE_PASS}"
+
+          {
+            echo "KEY_SOURCE=GITHUB SECRETS"
+            echo "ACTIVE_KEY_ALIAS=$RESOLVED_ALIAS"
+            echo "ACTIVE_STORE_PASS=$RESOLVED_STORE_PASS"
+            echo "ACTIVE_KEY_PASS=$RESOLVED_KEY_PASS"
+            echo "ACTIVE_KEYSTORE_B64<<EOF"
+            echo "$SECRET_B64"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Zipalign, Sign & Verify APK
+        id: sign_apk
+        run: |
+          VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle* 2>/dev/null | head -n1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME=$(grep -E 'versionName\s+"' app/build.gradle* 2>/dev/null | head -n1 | sed -E 's/.*versionName\s+"([^"]+)".*/\1/')
+          fi
+          VERSION_NAME="${VERSION_NAME:-1.0.0}"
+
+          RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
+          if [ -z "$RAW_APK" ]; then
+            echo "APK release tidak ditemukan!"
+            exit 1
+          fi
+
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          SIGNED_APK="AltHub-v${VERSION_NAME}-b${GITHUB_RUN_NUMBER}.apk"
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$RAW_APK" aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks release-keystore.jks \
+            --ks-key-alias "$ACTIVE_KEY_ALIAS" \
+            --ks-pass "pass:$ACTIVE_STORE_PASS" \
+            --key-pass "pass:$ACTIVE_KEY_PASS" \
+            --out "$SIGNED_APK" \
+            aligned.apk
+
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED_APK"
+
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "signed_apk=$SIGNED_APK" >> "$GITHUB_OUTPUT"
+
+      - name: Write Signing Key to Job Summary
+        if: always()
+        run: |
+          CERT_INFO=$(keytool -list -v -keystore release-keystore.jks -alias "$ACTIVE_KEY_ALIAS" -storepass "$ACTIVE_STORE_PASS" 2>/dev/null | grep -E "SHA1:|SHA256:|Valid from:" || true)
+          {
+            echo "## 🔐 AltHub APK Signing Key Info"
+            echo ""
+            echo "- **Sumber Key:** \`$KEY_SOURCE\`"
+            echo "- **APK Output:** \`${{ steps.sign_apk.outputs.signed_apk }}\`"
+            echo ""
+            echo "### Detail Secret Variables"
+            echo "| Secret Name | Value |"
+            echo "| :--- | :--- |"
+            echo "| \`SIGNING_KEY_ALIAS\` | \`$ACTIVE_KEY_ALIAS\` |"
+            echo "| \`SIGNING_STORE_PASSWORD\` | \`$ACTIVE_STORE_PASS\` |"
+            echo "| \`SIGNING_KEY_PASSWORD\` | \`$ACTIVE_KEY_PASS\` |"
+            echo ""
+            echo "### \`SIGNING_KEYSTORE_BASE64\`"
+            echo '```text'
+            echo "$ACTIVE_KEYSTORE_B64"
+            echo '```'
+            echo ""
+            echo "### Certificate Fingerprint"
+            echo '```text'
+            echo "$CERT_INFO"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Signed APK Directly to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            RELEASE_TAG="${{ github.ref_name }}"
+          else
+            RELEASE_TAG="v${{ steps.sign_apk.outputs.version_name }}-b${GITHUB_RUN_NUMBER}"
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            "${{ steps.sign_apk.outputs.signed_apk }}" \
+            --title "AltHub v${{ steps.sign_apk.outputs.version_name }} (Build #${GITHUB_RUN_NUMBER})" \
+            --notes "Build otomatis dari commit \`${GITHUB_SHA::7}\` (ARMv7 & ARMv8)." \
+            --latest
