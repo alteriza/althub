@@ -15,7 +15,6 @@ object AppStorageManager {
     private const val KEY_HW_ACCEL = "hw_acceleration"
     private const val KEY_DL_FORMAT = "download_format_pref"
     private const val KEY_HISTORY = "media_history_json"
-    private const val KEY_DOWNLOAD_MAP = "downloaded_item_map_json"
 
     fun isHwAccelerationEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -43,64 +42,6 @@ object AppStorageManager {
             .apply()
     }
 
-    fun recordDownloadedItem(context: Context, itemId: String, filePath: String) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val mapObj = runCatching {
-            JSONObject(prefs.getString(KEY_DOWNLOAD_MAP, "{}") ?: "{}")
-        }.getOrDefault(JSONObject())
-        mapObj.put(itemId, filePath)
-        prefs.edit().putString(KEY_DOWNLOAD_MAP, mapObj.toString()).apply()
-    }
-
-    fun removeDownloadedItemRecord(context: Context, filePath: String) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val mapObj = runCatching {
-            JSONObject(prefs.getString(KEY_DOWNLOAD_MAP, "{}") ?: "{}")
-        }.getOrDefault(JSONObject())
-        val toRemove = mutableListOf<String>()
-        val keys = mapObj.keys()
-        while (keys.hasNext()) {
-            val k = keys.next()
-            if (mapObj.optString(k) == filePath) toRemove.add(k)
-        }
-        toRemove.forEach { mapObj.remove(it) }
-        prefs.edit().putString(KEY_DOWNLOAD_MAP, mapObj.toString()).apply()
-    }
-
-    fun findDownloadedFile(context: Context, item: RemoteMediaItem): File? {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val mapObj = runCatching {
-            JSONObject(prefs.getString(KEY_DOWNLOAD_MAP, "{}") ?: "{}")
-        }.getOrNull()
-        val mappedPath = mapObj?.optString(item.id, "")?.ifBlank { null }
-        if (mappedPath != null) {
-            val f = File(mappedPath)
-            if (f.exists() && f.isFile && f.length() > 0L) return f
-        }
-        val dir = getDefaultDownloadDir(context)
-        val files = dir.listFiles() ?: return null
-        val targetBase = sanitizeFileName(
-            item.fileName.substringBeforeLast('.', item.fileName)
-        ).lowercase()
-        if (targetBase.isBlank()) return null
-        val validExts = if (item.kind == MediaKind.VIDEO) {
-            setOf("vcv", "mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp", "ts")
-        } else {
-            setOf("icv", "png", "jpg", "jpeg", "webp", "gif", "bmp")
-        }
-        val matched = files.firstOrNull { f ->
-            if (!f.isFile || f.length() <= 0L) return@firstOrNull false
-            val ext = f.extension.lowercase()
-            if (ext !in validExts) return@firstOrNull false
-            val base = f.nameWithoutExtension.lowercase()
-            base == targetBase || base.startsWith("${targetBase}_")
-        }
-        if (matched != null) {
-            recordDownloadedItem(context, item.id, matched.absolutePath)
-        }
-        return matched
-    }
-
     fun getDefaultDownloadDir(context: Context): File {
         val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val dir = File(publicDownloads, "AltHub")
@@ -124,7 +65,10 @@ object AppStorageManager {
                     lower.endsWith(".mkv") ||
                     lower.endsWith(".webm") ||
                     lower.endsWith(".mov") ||
-                    lower.endsWith(".avi")
+                    lower.endsWith(".avi") ||
+                    lower.endsWith(".m4v") ||
+                    lower.endsWith(".3gp") ||
+                    lower.endsWith(".ts")
                 DownloadedFileEntry(
                     name = f.name,
                     path = f.absolutePath,
@@ -154,6 +98,7 @@ object AppStorageManager {
         }
         wipe(context.cacheDir)
         wipe(context.externalCacheDir)
+        LocalStreamServer.initCacheDir(context)
         AutoDiscoveryRepository.clearMemoryCache()
     }
 
@@ -242,7 +187,6 @@ object AppStorageManager {
                 startUrl = item.mediaUrl,
                 extraHeaders = item.headers
             )
-            var detectedContainer = item.isContainer
             var originalExt = item.fileName.substringAfterLast('.', "").lowercase().ifBlank {
                 if (item.kind == MediaKind.VIDEO) "mp4" else "jpg"
             }
@@ -256,7 +200,6 @@ object AppStorageManager {
                     bis.reset()
 
                     if (mStr == "SVCV" || mStr == "SICV") {
-                        detectedContainer = true
                         val info = LocalStreamServer.parseContainerHeaderFromStream(bis)
                         originalExt = info.originalExt.ifBlank { originalExt }
                         FileOutputStream(tempRaw).use { fos ->
@@ -269,7 +212,6 @@ object AppStorageManager {
                             }
                         }
                     } else {
-                        detectedContainer = false
                         FileOutputStream(tempRaw).use { fos ->
                             bis.copyTo(fos, 65_536)
                         }
@@ -301,12 +243,10 @@ object AppStorageManager {
                 }
                 dest
             } else {
-                val cleanExt = if (originalExt == "vcv") {
-                    "mp4"
-                } else if (originalExt == "icv") {
-                    "jpg"
-                } else {
-                    originalExt
+                val cleanExt = when (originalExt) {
+                    "vcv" -> "mp4"
+                    "icv" -> "jpg"
+                    else -> originalExt
                 }
                 val dest = uniqueFile(outDir, "$baseName.$cleanExt")
                 FileOutputStream(dest).use { fos ->
@@ -316,13 +256,12 @@ object AppStorageManager {
                 dest
             }
 
-            recordDownloadedItem(context, item.id, finalFile.absolutePath)
             finalFile
         }
     }
 
     private fun sanitizeFileName(raw: String): String {
-        return raw.replace(Regex("""[^a-zA-Z0-9._-]"""), "_").take(80)
+        return raw.replace(Regex("""[^a-zA-Z0-9._\-\[\]()]"""), "_").take(100)
     }
 
     private fun uniqueFile(dir: File, fileName: String): File {

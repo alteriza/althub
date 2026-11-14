@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.PlaybackParams
@@ -14,7 +13,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.view.Gravity
-import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
@@ -54,9 +52,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -79,7 +75,6 @@ import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.NorthEast
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.ScreenRotation
@@ -101,7 +96,6 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -118,10 +112,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -151,29 +141,15 @@ import com.althub.alteriza.ui.theme.BbOrange
 import com.althub.alteriza.ui.theme.BbSurface
 import com.althub.alteriza.ui.theme.BbSurfaceElevated
 import com.althub.alteriza.ui.theme.BbWhite
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
-import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 private const val CORN_ALERT_TITLE = "CORN // HIDDEN SECTION"
-private const val CORN_ALERT_MESSAGE = "WARNING! ADULT ONLY — SOLVE CAPTCHA TO ENTER"
-private const val CORN_TAP_TARGET = 10
-private const val CORN_TAP_MAX_DELAY_MS = 450L
-
-private fun generateRandomCaptcha(length: Int = 6): String {
-    val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    val rng = SecureRandom()
-    return buildString(length) {
-        repeat(length) {
-            append(chars[rng.nextInt(chars.length)])
-        }
-    }
-}
+private const val CORN_ALERT_MESSAGE = "WARNING! ADULT ONLY"
 
 private const val PREFS_NAME = "althub_prefs"
 private const val KEY_WELCOME_SHOWN = "welcome_popup_shown"
@@ -244,22 +220,10 @@ fun AltHubApp() {
 
     var CORNUnlocked by remember { mutableStateOf(false) }
     var showCORNAlert by remember { mutableStateOf(false) }
-    var cornAlertIsExit by remember { mutableStateOf(false) }
-    var captchaCode by remember { mutableStateOf(generateRandomCaptcha()) }
-    var captchaInput by remember { mutableStateOf("") }
-    var captchaError by remember { mutableStateOf(false) }
     var logoTapCount by remember { mutableIntStateOf(0) }
     var lastLogoTapMs by remember { mutableLongStateOf(0L) }
 
     var welcomePopupPost by remember { mutableStateOf<InfoPost?>(null) }
-    var selectedPost by remember { mutableStateOf<InfoPost?>(null) }
-    var activeSyncJob by remember { mutableStateOf<Job?>(null) }
-
-    val feedListState = rememberLazyListState()
-    val videosListState = rememberLazyListState()
-    val photosListState = rememberLazyListState()
-    val infoListState = rememberLazyListState()
-    val cornListState = rememberLazyListState()
 
     var hwAcceleration by remember { mutableStateOf(AppStorageManager.isHwAccelerationEnabled(context)) }
     var downloadFormatPref by remember { mutableStateOf(AppStorageManager.getDownloadFormatPref(context)) }
@@ -294,11 +258,10 @@ fun AltHubApp() {
     var selectedMedia by remember { mutableStateOf<RemoteMediaItem?>(null) }
 
     fun openMedia(item: RemoteMediaItem) {
-        activeSyncJob?.cancel()
-        activeSyncJob = null
-        isRefreshing = false
-        AppStorageManager.recordHistory(context, item)
-        storageRefreshTick++
+        if (item.localPath == null) {
+            AppStorageManager.recordHistory(context, item)
+            storageRefreshTick++
+        }
         val cachedThumb = AutoDiscoveryRepository.getCachedThumbnail(item.id)
         if (cachedThumb != null) {
             activity?.requestedOrientation = if (cachedThumb.width > cachedThumb.height) {
@@ -360,9 +323,7 @@ fun AltHubApp() {
     }
 
     suspend fun syncRepository(fromPullRefresh: Boolean = false) {
-        if (selectedMedia != null) return
         if (fromPullRefresh) {
-            AutoDiscoveryRepository.clearFailedThumbCache()
             isRefreshing = true
         } else {
             initialLoading = true
@@ -407,16 +368,10 @@ fun AltHubApp() {
         }
     }
 
-    LaunchedEffect(logoTapCount, lastLogoTapMs) {
-        if (logoTapCount in 1 until CORN_TAP_TARGET) {
-            delay(CORN_TAP_MAX_DELAY_MS + 20L)
-            logoTapCount = 0
-        }
-    }
-
     LaunchedEffect(Unit) {
+        LocalStreamServer.initCacheDir(context)
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        activeSyncJob = scope.launch { syncRepository(fromPullRefresh = false) }
+        syncRepository(fromPullRefresh = false)
     }
 
     val allVideos = remember(discovery.mediaItems, searchQuery) {
@@ -424,7 +379,8 @@ fun AltHubApp() {
             item.kind == MediaKind.VIDEO && (
                 searchQuery.isBlank() ||
                     item.title.contains(searchQuery, true) ||
-                    item.fileName.contains(searchQuery, true)
+                    item.fileName.contains(searchQuery, true) ||
+                    (item.videoTags?.contains(searchQuery, true) == true)
                 )
         }
     }
@@ -456,7 +412,8 @@ fun AltHubApp() {
             }
             val matchQuery = searchQuery.isBlank() ||
                 item.title.contains(searchQuery, true) ||
-                item.fileName.contains(searchQuery, true)
+                item.fileName.contains(searchQuery, true) ||
+                (item.videoTags?.contains(searchQuery, true) == true)
             matchChip && matchQuery
         }
     }
@@ -471,7 +428,8 @@ fun AltHubApp() {
             }
             val matchQuery = searchQuery.isBlank() ||
                 item.title.contains(searchQuery, true) ||
-                item.fileName.contains(searchQuery, true)
+                item.fileName.contains(searchQuery, true) ||
+                (item.videoTags?.contains(searchQuery, true) == true)
             matchChip && matchQuery
         }.map { TimelineEntry.MediaEntry(it) }
 
@@ -500,16 +458,12 @@ fun AltHubApp() {
         }
     }
 
-    val activeMedia = selectedMedia
-    val isViewerActive = activeMedia != null
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BbBackground)
     ) {
-        if (!isViewerActive) {
-            TechnicalGridBackdrop()
+        TechnicalGridBackdrop()
 
         Column(
             modifier = Modifier
@@ -523,20 +477,30 @@ fun AltHubApp() {
                 searchQuery = searchQuery,
                 onLogoTap = {
                     val now = SystemClock.elapsedRealtime()
-                    logoTapCount = if (now - lastLogoTapMs <= CORN_TAP_MAX_DELAY_MS) logoTapCount + 1 else 1
+                    logoTapCount = if (now - lastLogoTapMs <= 2500L) logoTapCount + 1 else 1
                     lastLogoTapMs = now
-                    if (logoTapCount >= CORN_TAP_TARGET) {
+                    if (logoTapCount >= 5) {
                         logoTapCount = 0
                         settingsOpen = false
-                        cornAlertIsExit = CORNUnlocked
-                        captchaCode = generateRandomCaptcha()
-                        captchaInput = ""
-                        captchaError = false
-                        showCORNAlert = true
+                        if (!CORNUnlocked) {
+                            CORNUnlocked = true
+                            showCORNAlert = true
+                            currentTab = NavDestination.CORN
+                            scope.launch {
+                                isRefreshing = true
+                                CORNDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
+                                isRefreshing = false
+                            }
+                        } else {
+                            CORNUnlocked = false
+                            showCORNAlert = false
+                            CORNDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
+                            if (currentTab == NavDestination.CORN) {
+                                currentTab = NavDestination.FEED
+                            }
+                        }
                     } else if (logoTapCount == 1) {
                         settingsOpen = !settingsOpen
-                    } else {
-                        settingsOpen = false
                     }
                 },
                 onToggleSearch = {
@@ -592,13 +556,46 @@ fun AltHubApp() {
                                 thumbnailUrl = rec.thumbnailUrl,
                                 sizeBytes = 0L,
                                 folderPath = "/history",
-                                isContainer = rec.isContainer
+                                isContainer = rec.isContainer,
+                                videoTags = if (rec.kind == MediaKind.VIDEO) {
+                                    AutoDiscoveryRepository.extractVideoTags(rec.fileName)
+                                } else {
+                                    null
+                                }
+                            )
+                        )
+                    },
+                    onOpenDownloadedFile = { entry ->
+                        settingsOpen = false
+                        val lower = entry.name.lowercase()
+                        val isContainer = lower.endsWith(".vcv") || lower.endsWith(".icv")
+                        openMedia(
+                            RemoteMediaItem(
+                                id = "local_${entry.path.hashCode()}",
+                                title = if (entry.isVideo) {
+                                    AutoDiscoveryRepository.formatVideoTitle(entry.name)
+                                } else {
+                                    entry.name.substringBeforeLast('.', entry.name)
+                                },
+                                fileName = entry.name,
+                                kind = if (entry.isVideo) MediaKind.VIDEO else MediaKind.IMAGE,
+                                sourceType = SourceType.DIRECT,
+                                mediaUrl = Uri.fromFile(File(entry.path)).toString(),
+                                thumbnailUrl = null,
+                                sizeBytes = entry.sizeBytes,
+                                folderPath = "/local",
+                                isContainer = isContainer,
+                                localPath = entry.path,
+                                videoTags = if (entry.isVideo) {
+                                    AutoDiscoveryRepository.extractVideoTags(entry.name)
+                                } else {
+                                    null
+                                }
                             )
                         )
                     },
                     onDeleteDownloadedFile = { entry ->
                         runCatching { File(entry.path).delete() }
-                        AppStorageManager.removeDownloadedItemRecord(context, entry.path)
                         storageRefreshTick++
                     },
                     onClose = { settingsOpen = false },
@@ -612,8 +609,7 @@ fun AltHubApp() {
                 PullToRefreshBox(
                     isRefreshing = isRefreshing,
                     onRefresh = {
-                        activeSyncJob?.cancel()
-                        activeSyncJob = scope.launch { syncRepository(fromPullRefresh = true) }
+                        scope.launch { syncRepository(fromPullRefresh = true) }
                     },
                     state = pullRefreshState,
                     indicator = {
@@ -659,23 +655,14 @@ fun AltHubApp() {
                         currentTab == NavDestination.FEED -> {
                             val featuredItem = allVideos.firstOrNull() ?: allPhotos.firstOrNull()
                             LazyColumn(
-                                state = feedListState,
                                 contentPadding = PaddingValues(bottom = 20.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 if (featuredItem != null && searchQuery.isBlank() && activeFeedChip == FeedChip.ALL) {
-                                    val heroKey = "hero_${featuredItem.id}"
-                                    item(key = heroKey) {
-                                        val isHeroVisible by remember(heroKey) {
-                                            derivedStateOf {
-                                                feedListState.layoutInfo.visibleItemsInfo.any { it.key == heroKey }
-                                            }
-                                        }
+                                    item(key = "hero_${featuredItem.id}") {
                                         FeaturedMediaSpotlight(
                                             item = featuredItem,
-                                            isVisible = isHeroVisible,
-                                            isViewerActive = isViewerActive,
                                             onOpen = { openMedia(featuredItem) }
                                         )
                                     }
@@ -715,16 +702,8 @@ fun AltHubApp() {
                                     ) { entry ->
                                         when (entry) {
                                             is TimelineEntry.MediaEntry -> {
-                                                val itemKey = "m_${entry.item.id}"
-                                                val isCardVisible by remember(itemKey) {
-                                                    derivedStateOf {
-                                                        feedListState.layoutInfo.visibleItemsInfo.any { it.key == itemKey }
-                                                    }
-                                                }
                                                 SocialStreamPostCard(
                                                     item = entry.item,
-                                                    isVisible = isCardVisible,
-                                                    isViewerActive = isViewerActive,
                                                     onOpen = { openMedia(entry.item) },
                                                     onDownload = { requestDownload(entry.item) },
                                                     modifier = Modifier.padding(horizontal = 14.dp)
@@ -733,7 +712,6 @@ fun AltHubApp() {
                                             is TimelineEntry.PostEntry -> {
                                                 SocialAnnouncementCard(
                                                     post = entry.post,
-                                                    onOpenFull = { selectedPost = entry.post },
                                                     modifier = Modifier.padding(horizontal = 14.dp)
                                                 )
                                             }
@@ -745,7 +723,6 @@ fun AltHubApp() {
 
                         currentTab == NavDestination.VIDEOS -> {
                             LazyColumn(
-                                state = videosListState,
                                 contentPadding = PaddingValues(14.dp),
                                 verticalArrangement = Arrangement.spacedBy(14.dp),
                                 modifier = Modifier.fillMaxSize()
@@ -759,16 +736,9 @@ fun AltHubApp() {
                                     }
                                 } else {
                                     itemsIndexed(allVideos, key = { _, item -> item.id }) { idx, video ->
-                                        val isCardVisible by remember(video.id) {
-                                            derivedStateOf {
-                                                videosListState.layoutInfo.visibleItemsInfo.any { it.key == video.id }
-                                            }
-                                        }
                                         VideoStreamCard(
                                             indexNumber = allVideos.size - idx,
                                             item = video,
-                                            isVisible = isCardVisible,
-                                            isViewerActive = isViewerActive,
                                             onWatch = { openMedia(video) },
                                             onDownload = { requestDownload(video) }
                                         )
@@ -779,7 +749,6 @@ fun AltHubApp() {
 
                         currentTab == NavDestination.PHOTOS -> {
                             LazyColumn(
-                                state = photosListState,
                                 contentPadding = PaddingValues(14.dp),
                                 verticalArrangement = Arrangement.spacedBy(14.dp),
                                 modifier = Modifier.fillMaxSize()
@@ -793,15 +762,8 @@ fun AltHubApp() {
                                     }
                                 } else {
                                     items(allPhotos, key = { it.id }) { photo ->
-                                        val isCardVisible by remember(photo.id) {
-                                            derivedStateOf {
-                                                photosListState.layoutInfo.visibleItemsInfo.any { it.key == photo.id }
-                                            }
-                                        }
                                         SocialStreamPostCard(
                                             item = photo,
-                                            isVisible = isCardVisible,
-                                            isViewerActive = isViewerActive,
                                             onOpen = { openMedia(photo) },
                                             onDownload = { requestDownload(photo) }
                                         )
@@ -812,7 +774,6 @@ fun AltHubApp() {
 
                         currentTab == NavDestination.INFO -> {
                             LazyColumn(
-                                state = infoListState,
                                 contentPadding = PaddingValues(14.dp),
                                 verticalArrangement = Arrangement.spacedBy(14.dp),
                                 modifier = Modifier.fillMaxSize()
@@ -826,10 +787,7 @@ fun AltHubApp() {
                                     }
                                 } else {
                                     items(allPosts, key = { it.id }) { post ->
-                                        SocialAnnouncementCard(
-                                            post = post,
-                                            onOpenFull = { selectedPost = post }
-                                        )
+                                        SocialAnnouncementCard(post = post)
                                     }
                                 }
                             }
@@ -837,7 +795,6 @@ fun AltHubApp() {
 
                         currentTab == NavDestination.CORN -> {
                             LazyColumn(
-                                state = cornListState,
                                 contentPadding = PaddingValues(14.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.fillMaxSize()
@@ -900,25 +857,14 @@ fun AltHubApp() {
                                     }
                                 } else {
                                     items(CORNFilteredMedia, key = { "CORN_${it.id}" }) { media ->
-                                        val itemKey = "CORN_${media.id}"
-                                        val isCardVisible by remember(itemKey) {
-                                            derivedStateOf {
-                                                cornListState.layoutInfo.visibleItemsInfo.any { it.key == itemKey }
-                                            }
-                                        }
                                         SocialStreamPostCard(
                                             item = media,
-                                            isVisible = isCardVisible,
-                                            isViewerActive = isViewerActive,
                                             onOpen = { openMedia(media) },
                                             onDownload = { requestDownload(media) }
                                         )
                                     }
                                     items(CORNDiscovery.infoPosts, key = { "CORN_post_${it.id}" }) { post ->
-                                        SocialAnnouncementCard(
-                                            post = post,
-                                            onOpenFull = { selectedPost = post }
-                                        )
+                                        SocialAnnouncementCard(post = post)
                                     }
                                 }
                             }
@@ -1072,7 +1018,7 @@ fun AltHubApp() {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.88f))
+                    .background(Color.Black.copy(alpha = 0.82f))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -1112,148 +1058,22 @@ fun AltHubApp() {
                             .background(BbBorder)
                     )
                     Text(
-                        text = if (cornAlertIsExit) {
-                            "HIDDEN SECTION IS ACTIVE. EXIT AND LOCK STREAM?"
-                        } else {
-                            CORN_ALERT_MESSAGE
-                        },
+                        text = CORN_ALERT_MESSAGE,
                         color = BbWhite,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
                         lineHeight = 18.sp
                     )
-
-                    if (!cornAlertIsExit) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CaptchaCanvas(
-                                code = captchaCode,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(52.dp)
-                                    .background(BbBlack)
-                                    .border(1.dp, BbBorderBright)
-                            )
-                            CubicSquareIconButton(
-                                icon = Icons.Default.Refresh,
-                                active = false,
-                                onClick = {
-                                    captchaCode = generateRandomCaptcha()
-                                    captchaInput = ""
-                                    captchaError = false
-                                }
-                            )
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(42.dp)
-                                .background(BbBlack)
-                                .border(1.dp, if (captchaError) BbOrange else BbBorderBright)
-                                .padding(horizontal = 12.dp),
-                            contentAlignment = Alignment.CenterStart
-                        ) {
-                            if (captchaInput.isEmpty()) {
-                                Text(
-                                    text = "ENTER CAPTCHA CODE...",
-                                    color = BbMuted,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp
-                                )
-                            }
-                            BasicTextField(
-                                value = captchaInput,
-                                onValueChange = {
-                                    captchaInput = it.uppercase().take(8)
-                                    captchaError = false
-                                },
-                                singleLine = true,
-                                cursorBrush = SolidColor(BbOrange),
-                                textStyle = TextStyle(
-                                    color = BbWhite,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                    letterSpacing = 2.sp
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
-                        if (captchaError) {
-                            Text(
-                                text = "INVALID CAPTCHA — NEW CODE GENERATED",
-                                color = BbOrange,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
-
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+                        horizontalArrangement = Arrangement.End
                     ) {
-                        if (cornAlertIsExit) {
-                            CubicActionButton(
-                                text = "CANCEL",
-                                primary = false,
-                                onClick = { showCORNAlert = false }
-                            )
-                            CubicActionButton(
-                                text = "EXIT",
-                                icon = Icons.Default.Close,
-                                primary = true,
-                                onClick = {
-                                    showCORNAlert = false
-                                    CORNUnlocked = false
-                                    CORNDiscovery = DiscoveryResult(emptyList(), emptyList(), emptyList())
-                                    if (currentTab == NavDestination.CORN) {
-                                        currentTab = NavDestination.FEED
-                                    }
-                                }
-                            )
-                        } else {
-                            CubicActionButton(
-                                text = "EXIT",
-                                icon = Icons.Default.Close,
-                                primary = false,
-                                onClick = {
-                                    showCORNAlert = false
-                                    captchaInput = ""
-                                    captchaError = false
-                                }
-                            )
-                            CubicActionButton(
-                                text = "ENTER",
-                                icon = Icons.Default.NorthEast,
-                                primary = true,
-                                onClick = {
-                                    if (captchaInput.trim().equals(captchaCode, ignoreCase = true)) {
-                                        showCORNAlert = false
-                                        captchaInput = ""
-                                        captchaError = false
-                                        CORNUnlocked = true
-                                        currentTab = NavDestination.CORN
-                                        activeSyncJob?.cancel()
-                                        activeSyncJob = scope.launch {
-                                            isRefreshing = true
-                                            CORNDiscovery = AutoDiscoveryRepository.discoverHiddenCdn()
-                                            isRefreshing = false
-                                        }
-                                    } else {
-                                        captchaError = true
-                                        captchaCode = generateRandomCaptcha()
-                                        captchaInput = ""
-                                    }
-                                }
-                            )
-                        }
+                        CubicActionButton(
+                            text = "ENTER CORN",
+                            icon = Icons.Default.NorthEast,
+                            primary = true,
+                            onClick = { showCORNAlert = false }
+                        )
                     }
                 }
             }
@@ -1351,17 +1171,8 @@ fun AltHubApp() {
             }
         }
 
-        val activeFullPost = selectedPost
-        if (activeFullPost != null) {
-            BackHandler {
-                selectedPost = null
-            }
-            FullPostReaderScreen(
-                post = activeFullPost,
-                onBack = { selectedPost = null }
-            )
-        }
-        } else if (activeMedia != null) {
+        val activeMedia = selectedMedia
+        if (activeMedia != null) {
             BackHandler {
                 closeViewer()
             }
@@ -1382,7 +1193,6 @@ fun AltHubApp() {
                     CubicStreamingVideoPlayer(
                         item = activeMedia,
                         hwAcceleration = hwAcceleration,
-                        storageRefreshTick = storageRefreshTick,
                         onOrientationResolved = { isLandscape ->
                             activity?.requestedOrientation = if (isLandscape) {
                                 ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -1407,7 +1217,6 @@ fun AltHubApp() {
                 } else {
                     CubicStreamingImageViewer(
                         item = activeMedia,
-                        storageRefreshTick = storageRefreshTick,
                         onOrientationResolved = { isLandscape ->
                             activity?.requestedOrientation = if (isLandscape) {
                                 ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -1419,34 +1228,6 @@ fun AltHubApp() {
                         onDownload = { requestDownload(activeMedia) },
                         onBack = { closeViewer() }
                     )
-                }
-
-                if (isDownloading) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .windowInsetsPadding(WindowInsets.safeDrawing)
-                            .padding(top = 66.dp)
-                            .background(BbSurfaceElevated)
-                            .border(1.dp, BbOrange)
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(
-                                color = BbOrange,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "DOWNLOADING TO STORAGE...",
-                                color = BbWhite,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -1463,6 +1244,7 @@ private fun SettingsScreen(
     onClearCache: () -> Unit,
     onClearHistory: () -> Unit,
     onOpenHistoryItem: (HistoryRecord) -> Unit,
+    onOpenDownloadedFile: (DownloadedFileEntry) -> Unit,
     onDeleteDownloadedFile: (DownloadedFileEntry) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
@@ -1582,7 +1364,7 @@ private fun SettingsScreen(
                         fontSize = 12.sp
                     )
                     Text(
-                        text = if (hwAcceleration) "Hardware video decoding active" else "Software layer fallback active",
+                        text = if (hwAcceleration) "Hardware video decoding active" else "Software fallback active",
                         color = BbMuted,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp
@@ -1712,6 +1494,7 @@ private fun SettingsScreen(
                         .fillMaxWidth()
                         .background(BbSurface)
                         .border(1.dp, BbBorder)
+                        .clickable { onOpenDownloadedFile(entry) }
                         .padding(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1726,12 +1509,19 @@ private fun SettingsScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${if (entry.isVideo) "VIDEO" else "PHOTO"} • ${formatBytes(entry.sizeBytes)}",
+                            text = "${if (entry.isVideo) "LOCAL VIDEO" else "LOCAL PHOTO"} • ${formatBytes(entry.sizeBytes)}",
                             color = BbMuted,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp
                         )
                     }
+                    Spacer(Modifier.width(8.dp))
+                    CubicSquareIconButton(
+                        icon = Icons.Default.PlayArrow,
+                        active = true,
+                        onClick = { onOpenDownloadedFile(entry) }
+                    )
+                    Spacer(Modifier.width(6.dp))
                     CubicSquareIconButton(
                         icon = Icons.Default.Delete,
                         active = false,
@@ -2008,16 +1798,13 @@ private fun SocialTopBar(
 @Composable
 private fun FeaturedMediaSpotlight(
     item: RemoteMediaItem,
-    isVisible: Boolean,
-    isViewerActive: Boolean,
     onOpen: () -> Unit
 ) {
     val context = LocalContext.current
     var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
 
-    LaunchedEffect(item.id, isVisible, isViewerActive) {
-        if (thumb == null && isVisible && !isViewerActive) {
-            delay(180L)
+    LaunchedEffect(item.id) {
+        if (thumb == null) {
             thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
         }
     }
@@ -2052,6 +1839,15 @@ private fun FeaturedMediaSpotlight(
                     )
                 )
         )
+        val tags = item.videoTags
+        if (item.kind == MediaKind.VIDEO && !tags.isNullOrBlank()) {
+            VideoTagBadge(
+                tags = tags,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp)
+            )
+        }
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -2116,6 +1912,29 @@ private fun FeaturedMediaSpotlight(
 }
 
 @Composable
+private fun VideoTagBadge(
+    tags: String,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .background(BbBlack.copy(alpha = 0.88f))
+            .border(1.dp, BbBorderBright)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = tags,
+            color = BbOrange,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            fontSize = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
 private fun CubicFilterChip(
     label: String,
     selected: Boolean,
@@ -2152,23 +1971,17 @@ private fun CubicFilterChip(
 @Composable
 private fun SocialStreamPostCard(
     item: RemoteMediaItem,
-    isVisible: Boolean,
-    isViewerActive: Boolean,
     onOpen: () -> Unit,
     onDownload: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
-    var thumbLoading by remember(item.id) { mutableStateOf(false) }
+    var thumbLoading by remember(item.id) { mutableStateOf(thumb == null) }
 
-    LaunchedEffect(item.id, isVisible, isViewerActive) {
-        if (thumb == null && isVisible && !isViewerActive) {
-            thumbLoading = true
-            delay(180L)
+    LaunchedEffect(item.id) {
+        if (thumb == null) {
             thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
-            thumbLoading = false
-        } else if (!isVisible) {
             thumbLoading = false
         }
     }
@@ -2304,6 +2117,16 @@ private fun SocialStreamPostCard(
                         modifier = Modifier.size(28.dp)
                     )
                 }
+
+                val tags = item.videoTags
+                if (!tags.isNullOrBlank()) {
+                    VideoTagBadge(
+                        tags = tags,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(10.dp)
+                    )
+                }
             }
         }
 
@@ -2365,22 +2188,16 @@ private fun SocialStreamPostCard(
 private fun VideoStreamCard(
     indexNumber: Int,
     item: RemoteMediaItem,
-    isVisible: Boolean,
-    isViewerActive: Boolean,
     onWatch: () -> Unit,
     onDownload: () -> Unit
 ) {
     val context = LocalContext.current
     var thumb by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
-    var thumbLoading by remember(item.id) { mutableStateOf(false) }
+    var thumbLoading by remember(item.id) { mutableStateOf(thumb == null) }
 
-    LaunchedEffect(item.id, isVisible, isViewerActive) {
-        if (thumb == null && isVisible && !isViewerActive) {
-            thumbLoading = true
-            delay(180L)
+    LaunchedEffect(item.id) {
+        if (thumb == null) {
             thumb = AutoDiscoveryRepository.loadThumbnailBitmap(context, item)
-            thumbLoading = false
-        } else if (!isVisible) {
             thumbLoading = false
         }
     }
@@ -2450,6 +2267,16 @@ private fun VideoStreamCard(
                     modifier = Modifier.size(28.dp)
                 )
             }
+
+            val tags = item.videoTags
+            if (!tags.isNullOrBlank()) {
+                VideoTagBadge(
+                    tags = tags,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(10.dp)
+                )
+            }
         }
 
         Box(
@@ -2504,7 +2331,6 @@ private fun VideoStreamCard(
 @Composable
 private fun SocialAnnouncementCard(
     post: InfoPost,
-    onOpenFull: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -2512,7 +2338,6 @@ private fun SocialAnnouncementCard(
             .fillMaxWidth()
             .background(BbSurface)
             .border(1.dp, BbBorder)
-            .clickable(onClick = onOpenFull)
     ) {
         Row(
             modifier = Modifier
@@ -2597,186 +2422,8 @@ private fun SocialAnnouncementCard(
                 fontSize = 15.sp,
                 letterSpacing = 0.6.sp
             )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 220.dp)
-            ) {
-                BBCodeView(bbcode = post.bbcodeContent)
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(BbBorder)
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                CubicActionButton(
-                    text = "FULL VIEW",
-                    icon = Icons.Default.NorthEast,
-                    primary = true,
-                    onClick = onOpenFull
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FullPostReaderScreen(
-    post: InfoPost,
-    onBack: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BbBackground)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(BbSurfaceElevated)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            CubicActionButton(
-                text = "BACK",
-                icon = Icons.Default.ArrowBack,
-                primary = true,
-                onClick = onBack
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "ALTERIZA // FULL POST",
-                    color = BbOrange,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 10.sp
-                )
-                Text(
-                    text = post.fileName,
-                    color = BbMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(BbBorder)
-        )
-
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Text(
-                text = post.title.uppercase(),
-                color = BbWhite,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                letterSpacing = 0.8.sp
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(BbBorderBright)
-            )
             BBCodeView(bbcode = post.bbcodeContent)
-            Spacer(Modifier.height(24.dp))
         }
-    }
-}
-
-@Composable
-private fun CaptchaCanvas(
-    code: String,
-    modifier: Modifier = Modifier
-) {
-    Canvas(modifier = modifier) {
-        val rng = SecureRandom()
-        val w = size.width
-        val h = size.height
-        repeat(7) {
-            drawLine(
-                color = if (it % 2 == 0) BbOrange.copy(alpha = 0.45f) else BbBorderBright,
-                start = Offset(rng.nextFloat() * w, rng.nextFloat() * h),
-                end = Offset(rng.nextFloat() * w, rng.nextFloat() * h),
-                strokeWidth = 2f,
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f), 0f)
-            )
-        }
-        val stepX = w / (code.length + 1)
-        code.forEachIndexed { idx, ch ->
-            val cx = stepX * (idx + 1)
-            val cy = h * 0.5f + ((idx % 2) * 2 - 1) * 5f
-            val angle = ((idx * 17 + code.hashCode()) % 28 - 14).toFloat()
-            rotate(degrees = angle, pivot = Offset(cx, cy)) {
-                translate(left = cx - 8f, top = cy - 11f) {
-                    drawCaptchaGlyph(ch, if (idx % 2 == 0) BbWhite else BbOrange)
-                }
-            }
-        }
-    }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCaptchaGlyph(ch: Char, color: Color) {
-    val w = 16f
-    val h = 22f
-    val sw = 3.2f
-    val cap = StrokeCap.Square
-    val segs: List<Pair<Offset, Offset>> = when (ch) {
-        'A' -> listOf(Offset(0f, h) to Offset(w / 2, 0f), Offset(w / 2, 0f) to Offset(w, h), Offset(3f, h * 0.6f) to Offset(w - 3f, h * 0.6f))
-        'B' -> listOf(Offset(0f, 0f) to Offset(0f, h), Offset(0f, 0f) to Offset(w * 0.8f, 0f), Offset(w * 0.8f, 0f) to Offset(w * 0.8f, h / 2), Offset(0f, h / 2) to Offset(w, h / 2), Offset(w, h / 2) to Offset(w, h), Offset(0f, h) to Offset(w, h))
-        'C' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h), Offset(0f, h) to Offset(w, h))
-        'D' -> listOf(Offset(0f, 0f) to Offset(0f, h), Offset(0f, 0f) to Offset(w * 0.75f, 0f), Offset(w * 0.75f, 0f) to Offset(w, h * 0.3f), Offset(w, h * 0.3f) to Offset(w, h * 0.7f), Offset(w, h * 0.7f) to Offset(w * 0.75f, h), Offset(0f, h) to Offset(w * 0.75f, h))
-        'E' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h), Offset(0f, h / 2) to Offset(w * 0.8f, h / 2), Offset(0f, h) to Offset(w, h))
-        'F' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h), Offset(0f, h / 2) to Offset(w * 0.8f, h / 2))
-        'G' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h), Offset(0f, h) to Offset(w, h), Offset(w, h) to Offset(w, h / 2), Offset(w / 2, h / 2) to Offset(w, h / 2))
-        'H' -> listOf(Offset(0f, 0f) to Offset(0f, h), Offset(w, 0f) to Offset(w, h), Offset(0f, h / 2) to Offset(w, h / 2))
-        'J' -> listOf(Offset(w, 0f) to Offset(w, h), Offset(0f, h) to Offset(w, h), Offset(0f, h * 0.65f) to Offset(0f, h))
-        'K' -> listOf(Offset(0f, 0f) to Offset(0f, h), Offset(w, 0f) to Offset(0f, h / 2), Offset(0f, h / 2) to Offset(w, h))
-        'L' -> listOf(Offset(0f, 0f) to Offset(0f, h), Offset(0f, h) to Offset(w, h))
-        'M' -> listOf(Offset(0f, h) to Offset(0f, 0f), Offset(0f, 0f) to Offset(w / 2, h * 0.55f), Offset(w / 2, h * 0.55f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, h))
-        'N' -> listOf(Offset(0f, h) to Offset(0f, 0f), Offset(0f, 0f) to Offset(w, h), Offset(w, h) to Offset(w, 0f))
-        'P' -> listOf(Offset(0f, h) to Offset(0f, 0f), Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, h / 2), Offset(0f, h / 2) to Offset(w, h / 2))
-        'Q' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, h * 0.85f), Offset(w * 0.85f, h * 0.85f) to Offset(0f, h * 0.85f), Offset(0f, h * 0.85f) to Offset(0f, 0f), Offset(w * 0.55f, h * 0.6f) to Offset(w, h))
-        'R' -> listOf(Offset(0f, h) to Offset(0f, 0f), Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, h / 2), Offset(0f, h / 2) to Offset(w, h / 2), Offset(w * 0.45f, h / 2) to Offset(w, h))
-        'S' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h / 2), Offset(0f, h / 2) to Offset(w, h / 2), Offset(w, h / 2) to Offset(w, h), Offset(0f, h) to Offset(w, h))
-        'T' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(w / 2, 0f) to Offset(w / 2, h))
-        'U' -> listOf(Offset(0f, 0f) to Offset(0f, h), Offset(0f, h) to Offset(w, h), Offset(w, h) to Offset(w, 0f))
-        'V' -> listOf(Offset(0f, 0f) to Offset(w / 2, h), Offset(w / 2, h) to Offset(w, 0f))
-        'W' -> listOf(Offset(0f, 0f) to Offset(w * 0.25f, h), Offset(w * 0.25f, h) to Offset(w / 2, h * 0.45f), Offset(w / 2, h * 0.45f) to Offset(w * 0.75f, h), Offset(w * 0.75f, h) to Offset(w, 0f))
-        'X' -> listOf(Offset(0f, 0f) to Offset(w, h), Offset(w, 0f) to Offset(0f, h))
-        'Y' -> listOf(Offset(0f, 0f) to Offset(w / 2, h / 2), Offset(w, 0f) to Offset(w / 2, h / 2), Offset(w / 2, h / 2) to Offset(w / 2, h))
-        'Z' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(0f, h), Offset(0f, h) to Offset(w, h))
-        '2' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, h / 2), Offset(0f, h / 2) to Offset(w, h / 2), Offset(0f, h / 2) to Offset(0f, h), Offset(0f, h) to Offset(w, h))
-        '3' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w, h), Offset(w * 0.2f, h / 2) to Offset(w, h / 2), Offset(0f, h) to Offset(w, h))
-        '4' -> listOf(Offset(0f, 0f) to Offset(0f, h / 2), Offset(0f, h / 2) to Offset(w, h / 2), Offset(w, 0f) to Offset(w, h))
-        '5' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h / 2), Offset(0f, h / 2) to Offset(w, h / 2), Offset(w, h / 2) to Offset(w, h), Offset(0f, h) to Offset(w, h))
-        '6' -> listOf(Offset(w, 0f) to Offset(0f, 0f), Offset(0f, 0f) to Offset(0f, h), Offset(0f, h / 2) to Offset(w, h / 2), Offset(w, h / 2) to Offset(w, h), Offset(0f, h) to Offset(w, h))
-        '7' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(w, 0f) to Offset(w * 0.35f, h))
-        '8' -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(0f, h / 2) to Offset(w, h / 2), Offset(0f, h) to Offset(w, h), Offset(0f, 0f) to Offset(0f, h), Offset(w, 0f) to Offset(w, h))
-        else -> listOf(Offset(0f, 0f) to Offset(w, 0f), Offset(0f, h / 2) to Offset(w, h / 2), Offset(0f, h) to Offset(w, h), Offset(0f, 0f) to Offset(0f, h / 2), Offset(w, 0f) to Offset(w, h))
-    }
-    segs.forEach { (p1, p2) ->
-        drawLine(color = color, start = p1, end = p2, strokeWidth = sw, cap = cap)
     }
 }
 
@@ -2995,7 +2642,6 @@ private fun EmptyFeedBox(
 private fun CubicStreamingVideoPlayer(
     item: RemoteMediaItem,
     hwAcceleration: Boolean,
-    storageRefreshTick: Int,
     onOrientationResolved: (Boolean) -> Unit,
     onToggleOrientation: () -> Unit,
     onDownload: () -> Unit,
@@ -3003,26 +2649,14 @@ private fun CubicStreamingVideoPlayer(
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
-    val lifecycleOwner = LocalLifecycleOwner.current
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
-    val localFile = remember(item.id, storageRefreshTick) {
-        AppStorageManager.findDownloadedFile(context, item)
-    }
-    val isLocalSource = localFile != null
-    val playbackUri = remember(item.id, localFile?.absolutePath) {
-        if (localFile != null) {
-            if (localFile.name.endsWith(".vcv", ignoreCase = true)) {
-                Uri.parse(LocalStreamServer.getLocalStreamUrl(item, localFile))
-            } else {
-                Uri.fromFile(localFile)
-            }
-        } else {
-            Uri.parse(LocalStreamServer.getStreamUrl(item))
-        }
-    }
+    var retryTick by remember { mutableIntStateOf(0) }
+    var playableUri by remember(item.id, item.localPath, retryTick) { mutableStateOf<Uri?>(null) }
+    var prepError by remember(item.id, item.localPath, retryTick) { mutableStateOf<String?>(null) }
+
     var videoView by remember { mutableStateOf<VideoView?>(null) }
     var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -3030,6 +2664,7 @@ private fun CubicStreamingVideoPlayer(
     var durationMs by remember { mutableIntStateOf(1) }
     var ready by remember { mutableStateOf(false) }
     var hasError by remember { mutableStateOf(false) }
+    var errorDetail by remember { mutableStateOf("") }
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsLocked by remember { mutableStateOf(false) }
     var interactionTick by remember { mutableIntStateOf(0) }
@@ -3044,6 +2679,24 @@ private fun CubicStreamingVideoPlayer(
     var gestureBadge by remember { mutableStateOf<String?>(null) }
     var brightnessLevel by remember { mutableFloatStateOf(0.5f) }
 
+    LaunchedEffect(item.id, item.localPath, retryTick) {
+        ready = false
+        hasError = false
+        errorDetail = ""
+        playableUri = null
+        prepError = null
+        runCatching {
+            LocalStreamServer.preparePlayableUri(context, item)
+        }.onSuccess { uri ->
+            playableUri = uri
+        }.onFailure { err ->
+            prepError = err.message ?: "Failed to prepare stream"
+            hasError = true
+            errorDetail = prepError.orEmpty()
+            controlsVisible = true
+        }
+    }
+
     LaunchedEffect(controlsVisible, interactionTick, isPlaying, isSeeking) {
         if (controlsVisible && isPlaying && !isSeeking) {
             delay(3200L)
@@ -3055,22 +2708,6 @@ private fun CubicStreamingVideoPlayer(
         if (gestureBadge != null) {
             delay(900L)
             gestureBadge = null
-        }
-    }
-
-    DisposableEffect(lifecycleOwner, videoView) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) {
-                runCatching {
-                    videoView?.pause()
-                    isPlaying = false
-                }
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            runCatching { videoView?.stopPlayback() }
         }
     }
 
@@ -3147,64 +2784,84 @@ private fun CubicStreamingVideoPlayer(
                 }
             }
     ) {
-        AndroidView(
-            factory = { ctx ->
-                FrameLayout(ctx).apply {
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    val vv = VideoView(ctx).apply {
-                        layoutParams = FrameLayout.LayoutParams(
+        val activeUri = playableUri
+        if (activeUri != null) {
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            Gravity.CENTER
+                            ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        setLayerType(
-                            if (hwAcceleration) View.LAYER_TYPE_HARDWARE else View.LAYER_TYPE_SOFTWARE,
-                            null
-                        )
-                        setVideoURI(playbackUri)
-                        setOnPreparedListener { mp ->
-                            mediaPlayerRef = mp
-                            durationMs = mp.duration.coerceAtLeast(1)
-                            ready = true
-                            mp.isLooping = isLooping
-                            if (isMuted) mp.setVolume(0f, 0f) else mp.setVolume(1f, 1f)
-                            if (mp.videoWidth > 0 && mp.videoHeight > 0) {
-                                onOrientationResolved(mp.videoWidth > mp.videoHeight)
+                        val vv = VideoView(ctx).apply {
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                Gravity.CENTER
+                            )
+                            keepScreenOn = true
+                            setOnPreparedListener { mp ->
+                                mediaPlayerRef = mp
+                                durationMs = mp.duration.coerceAtLeast(1)
+                                ready = true
+                                hasError = false
+                                mp.isLooping = isLooping
+                                if (isMuted) mp.setVolume(0f, 0f) else mp.setVolume(1f, 1f)
+                                if (mp.videoWidth > 0 && mp.videoHeight > 0) {
+                                    onOrientationResolved(mp.videoWidth > mp.videoHeight)
+                                }
+                                start()
+                                isPlaying = true
+                                interactionTick++
                             }
-                            start()
-                            isPlaying = true
-                            interactionTick++
-                        }
-                        setOnCompletionListener {
-                            if (!isLooping) {
-                                isPlaying = false
-                                positionMs = durationMs
+                            setOnCompletionListener {
+                                if (!isLooping) {
+                                    isPlaying = false
+                                    positionMs = durationMs
+                                    controlsVisible = true
+                                }
+                            }
+                            setOnErrorListener { _, what, extra ->
+                                hasError = true
+                                errorDetail = "PLAYER ERROR ($what / $extra)"
                                 controlsVisible = true
+                                true
                             }
                         }
-                        setOnErrorListener { _, _, _ ->
-                            hasError = true
-                            controlsVisible = true
-                            true
-                        }
+                        videoView = vv
+                        addView(vv)
                     }
-                    videoView = vv
-                    addView(vv)
-                }
-            },
-            modifier = scaleMod
-        )
+                },
+                update = { container ->
+                    val vv = container.getChildAt(0) as? VideoView ?: return@AndroidView
+                    val targetKey = "${activeUri}_$retryTick"
+                    if (vv.tag != targetKey) {
+                        vv.tag = targetKey
+                        vv.setVideoURI(activeUri)
+                    }
+                },
+                modifier = scaleMod
+            )
+        }
 
         if (!ready && !hasError) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(
-                    color = BbOrange,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(30.dp)
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = BbOrange,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(30.dp)
+                    )
+                    Text(
+                        text = if (item.localPath != null) "PREPARING LOCAL MEDIA..." else "BUFFERING STREAM...",
+                        color = BbWhite,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
             }
         }
 
@@ -3235,7 +2892,7 @@ private fun CubicStreamingVideoPlayer(
                     .border(1.dp, BbBorder)
                     .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
                     text = "STREAM UNAVAILABLE",
@@ -3243,11 +2900,26 @@ private fun CubicStreamingVideoPlayer(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
                 )
-                CubicActionButton(
-                    text = "BACK",
-                    primary = true,
-                    onClick = onBack
-                )
+                if (errorDetail.isNotBlank()) {
+                    Text(
+                        text = errorDetail,
+                        color = BbMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CubicActionButton(
+                        text = "RETRY",
+                        primary = true,
+                        onClick = { retryTick++ }
+                    )
+                    CubicActionButton(
+                        text = "BACK",
+                        primary = false,
+                        onClick = onBack
+                    )
+                }
             }
         }
 
@@ -3468,23 +3140,17 @@ private fun CubicStreamingVideoPlayer(
                                 }
                             )
                             Spacer(Modifier.weight(1f))
-                            CubicActionButton(
-                                text = if (isLocalSource) "LOCAL" else "STREAM",
-                                icon = if (isLocalSource) Icons.Default.Verified else Icons.Default.Download,
-                                primary = isLocalSource,
-                                onClick = {
-                                    interactionTick++
-                                    if (isLocalSource) {
-                                        Toast.makeText(
-                                            context,
-                                            "Playing local file: ${localFile?.name}",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    } else {
+                            if (item.localPath == null) {
+                                CubicActionButton(
+                                    text = "SAVE",
+                                    icon = Icons.Default.Download,
+                                    primary = false,
+                                    onClick = {
+                                        interactionTick++
                                         onDownload()
                                     }
-                                }
-                            )
+                                )
+                            }
                         }
                     }
                 }
@@ -3496,16 +3162,10 @@ private fun CubicStreamingVideoPlayer(
 @Composable
 private fun CubicStreamingImageViewer(
     item: RemoteMediaItem,
-    storageRefreshTick: Int,
     onOrientationResolved: (Boolean) -> Unit,
     onDownload: () -> Unit,
     onBack: () -> Unit
 ) {
-    val context = LocalContext.current
-    val localFile = remember(item.id, storageRefreshTick) {
-        AppStorageManager.findDownloadedFile(context, item)
-    }
-    val isLocalSource = localFile != null
     var bitmap by remember(item.id) { mutableStateOf(AutoDiscoveryRepository.getCachedThumbnail(item.id)) }
     var isFullLoaded by remember(item.id) { mutableStateOf(false) }
     var loadFailed by remember(item.id) { mutableStateOf(false) }
@@ -3515,8 +3175,8 @@ private fun CubicStreamingImageViewer(
     var controlsVisible by remember { mutableStateOf(true) }
     var interactionTick by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(item.id, localFile?.absolutePath) {
-        val fullBmp = AutoDiscoveryRepository.loadBestImageBitmap(context, item)
+    LaunchedEffect(item.id, item.localPath) {
+        val fullBmp = AutoDiscoveryRepository.streamFullImageBitmap(item)
         if (fullBmp != null) {
             bitmap = fullBmp
             isFullLoaded = true
@@ -3660,23 +3320,17 @@ private fun CubicStreamingImageViewer(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                CubicActionButton(
-                    text = if (isLocalSource) "LOCAL" else "STREAM",
-                    icon = if (isLocalSource) Icons.Default.Verified else Icons.Default.Download,
-                    primary = isLocalSource,
-                    onClick = {
-                        interactionTick++
-                        if (isLocalSource) {
-                            Toast.makeText(
-                                context,
-                                "Viewing local file: ${localFile?.name}",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
+                if (item.localPath == null) {
+                    CubicActionButton(
+                        text = "SAVE",
+                        icon = Icons.Default.Download,
+                        primary = false,
+                        onClick = {
+                            interactionTick++
                             onDownload()
                         }
-                    }
-                )
+                    )
+                }
             }
         }
     }

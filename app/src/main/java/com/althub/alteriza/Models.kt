@@ -32,7 +32,9 @@ data class RemoteMediaItem(
     val sizeBytes: Long,
     val folderPath: String,
     val isContainer: Boolean = false,
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    val localPath: String? = null,
+    val videoTags: String? = null
 )
 
 data class ContainerHeaderInfo(

@@ -4,17 +4,13 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
-import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -28,11 +24,7 @@ object AutoDiscoveryRepository {
     private val VIDEO_EXTS = setOf("vcv", "mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp", "ts")
     private val IMAGE_EXTS = setOf("icv", "png", "jpg", "jpeg", "webp", "gif", "bmp")
 
-    private val memoryThumbs = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
-        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
-    }
-    private val failedThumbs = ConcurrentHashMap.newKeySet<String>()
-    private val thumbSemaphore = Semaphore(2)
+    private val memoryThumbs = ConcurrentHashMap<String, Bitmap>()
 
     @Volatile
     private var cachedGofileToken: String? = null
@@ -44,15 +36,103 @@ object AutoDiscoveryRepository {
         val subPath: String
     )
 
-    fun getCachedThumbnail(itemId: String): Bitmap? = memoryThumbs.get(itemId)
+    fun getCachedThumbnail(itemId: String): Bitmap? = memoryThumbs[itemId]
 
     fun clearMemoryCache() {
-        memoryThumbs.evictAll()
-        failedThumbs.clear()
+        memoryThumbs.clear()
     }
 
-    fun clearFailedThumbCache() {
-        failedThumbs.clear()
+    fun extractVideoTags(fileName: String): String? {
+        val base = fileName.substringBeforeLast('.', fileName)
+        val matches = Regex("""\[([^\[\]]+)]""").findAll(base).toList()
+        if (matches.isEmpty()) return null
+        return matches.joinToString("") { "[${it.groupValues[1].trim()}]" }
+    }
+
+    fun stripVideoTags(fileName: String): String {
+        val base = fileName.substringBeforeLast('.', fileName)
+        val stripped = base.replace(Regex("""\[[^\[\]]+]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim(' ', '-', '_')
+        return stripped.ifBlank { base }
+    }
+
+    fun formatVideoTitle(fileName: String): String {
+        val cleaned = stripVideoTags(fileName)
+        return cleaned.replace('_', ' ').replace(Regex("""\s+"""), " ").trim().ifEmpty { fileName }
+    }
+
+    private fun extractSeriesBaseKey(fileName: String): String {
+        var s = stripVideoTags(fileName)
+        s = s.replace(Regex("""\([^()]*\)"""), " ")
+        s = s.replace(
+            Regex(
+                """(?:^|[\s._-])(?:s\d{1,2}\s*e\d{1,4}|ep(?:isode|s)?\s*\d{1,4}|part\s*\d{1,3}|vol(?:ume)?\s*\d{1,3}|#\d{1,4}|\d{1,4})$""",
+                RegexOption.IGNORE_CASE
+            ),
+            ""
+        )
+        return s.replace('_', ' ')
+            .replace('-', ' ')
+            .replace('.', ' ')
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .lowercase()
+    }
+
+    private fun resolveMultiUseThumbnail(
+        videoFileName: String,
+        thumbByTargetName: Map<String, String>
+    ): String? {
+        if (thumbByTargetName.isEmpty()) return null
+
+        val lowerFull = videoFileName.lowercase()
+        val lowerNoExt = lowerFull.substringBeforeLast('.')
+        thumbByTargetName[lowerFull]?.let { return it }
+        thumbByTargetName[lowerNoExt]?.let { return it }
+
+        val tagStripped = stripVideoTags(videoFileName).lowercase()
+        val tagStrippedNormalized = tagStripped
+            .replace('_', ' ')
+            .replace('-', ' ')
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+        thumbByTargetName[tagStripped]?.let { return it }
+        thumbByTargetName[tagStrippedNormalized]?.let { return it }
+
+        val seriesKey = extractSeriesBaseKey(videoFileName)
+        if (seriesKey.isNotEmpty()) {
+            thumbByTargetName[seriesKey]?.let { return it }
+        }
+
+        val candidates = listOf(tagStrippedNormalized, seriesKey, lowerNoExt)
+            .filter { it.isNotEmpty() }
+            .distinct()
+
+        val sortedKeys = thumbByTargetName.keys.sortedByDescending { it.length }
+        for (thumbKey in sortedKeys) {
+            val normThumb = thumbKey
+                .replace('_', ' ')
+                .replace('-', ' ')
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+            if (normThumb.length < 3) continue
+            for (cand in candidates) {
+                if (cand == normThumb) return thumbByTargetName[thumbKey]
+                if (cand.startsWith("$normThumb ") ||
+                    cand.startsWith("$normThumb-") ||
+                    cand.startsWith("${normThumb}_") ||
+                    cand.startsWith("$normThumb.")
+                ) {
+                    return thumbByTargetName[thumbKey]
+                }
+                val wordBoundaryRegex = Regex("""(?:^|[\s._\-\[\](])${Regex.escape(normThumb)}(?:$|[\s._\-\[\])])""")
+                if (wordBoundaryRegex.containsMatchIn(cand)) {
+                    return thumbByTargetName[thumbKey]
+                }
+            }
+        }
+        return null
     }
 
     suspend fun discoverAll(): DiscoveryResult =
@@ -217,6 +297,35 @@ object AutoDiscoveryRepository {
         }
     }
 
+    private fun buildMediaItem(
+        id: String,
+        fileName: String,
+        kind: MediaKind,
+        sourceType: SourceType,
+        mediaUrl: String,
+        thumbnailUrl: String?,
+        sizeBytes: Long,
+        folderPath: String,
+        isContainer: Boolean,
+        headers: Map<String, String> = emptyMap()
+    ): RemoteMediaItem {
+        val isVideo = kind == MediaKind.VIDEO
+        return RemoteMediaItem(
+            id = id,
+            title = if (isVideo) formatVideoTitle(fileName) else formatTitle(fileName),
+            fileName = fileName,
+            kind = kind,
+            sourceType = sourceType,
+            mediaUrl = mediaUrl,
+            thumbnailUrl = thumbnailUrl,
+            sizeBytes = sizeBytes,
+            folderPath = folderPath,
+            isContainer = isContainer,
+            headers = headers,
+            videoTags = if (isVideo) extractVideoTags(fileName) else null
+        )
+    }
+
     private fun discoverPixeldrainFile(
         fileId: String,
         streamUrl: String,
@@ -231,9 +340,8 @@ object AutoDiscoveryRepository {
         val classified = classifyMediaByName(name, mime) ?: (MediaKind.VIDEO to false)
         val itemKey = sha256(streamUrl)
         val thumb = if (classified.first == MediaKind.VIDEO) "$streamUrl/thumbnail" else null
-        mediaMap[itemKey] = RemoteMediaItem(
+        mediaMap[itemKey] = buildMediaItem(
             id = itemKey,
-            title = formatTitle(name),
             fileName = name,
             kind = classified.first,
             sourceType = SourceType.PIXELDRAIN,
@@ -262,9 +370,8 @@ object AutoDiscoveryRepository {
             val streamUrl = "https://pixeldrain.com/api/file/$fid"
             val itemKey = sha256(streamUrl)
             val thumb = if (classified.first == MediaKind.VIDEO) "$streamUrl/thumbnail" else null
-            mediaMap[itemKey] = RemoteMediaItem(
+            mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
-                title = formatTitle(name),
                 fileName = name,
                 kind = classified.first,
                 sourceType = SourceType.PIXELDRAIN,
@@ -330,9 +437,8 @@ object AutoDiscoveryRepository {
             if (link.isBlank()) continue
             val classified = classifyMediaByName(name, mime) ?: continue
             val itemKey = sha256(link)
-            mediaMap[itemKey] = RemoteMediaItem(
+            mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
-                title = formatTitle(name),
                 fileName = name,
                 kind = classified.first,
                 sourceType = SourceType.GOFILE,
@@ -375,9 +481,8 @@ object AutoDiscoveryRepository {
                 }
                 val classified = classifyMediaByName(finalName) ?: (MediaKind.VIDEO to false)
                 val itemKey = sha256(direct)
-                mediaMap[itemKey] = RemoteMediaItem(
+                mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
-                    title = formatTitle(finalName),
                     fileName = finalName,
                     kind = classified.first,
                     sourceType = SourceType.ACEFILE,
@@ -415,9 +520,8 @@ object AutoDiscoveryRepository {
                 ?.trim()
                 ?.toLongOrNull() ?: 0L
             val itemKey = "gdrive_$fileId"
-            mediaMap[itemKey] = RemoteMediaItem(
+            mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
-                title = formatTitle(fileName),
                 fileName = fileName,
                 kind = classified.first,
                 sourceType = SourceType.GDRIVE,
@@ -443,9 +547,8 @@ object AutoDiscoveryRepository {
 
         if (directClassified != null) {
             val itemKey = sha256(rawUrl)
-            mediaMap[itemKey] = RemoteMediaItem(
+            mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
-                title = formatTitle(candidateName),
                 fileName = candidateName,
                 kind = directClassified.first,
                 sourceType = sourceType,
@@ -476,9 +579,8 @@ object AutoDiscoveryRepository {
                     .ifBlank { dispName.ifBlank { "stream_media.mp4" } }
                 val classified = classifyMediaByName(extractedName) ?: (MediaKind.VIDEO to false)
                 val itemKey = sha256(extracted)
-                mediaMap[itemKey] = RemoteMediaItem(
+                mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
-                    title = formatTitle(extractedName),
                     fileName = extractedName,
                     kind = classified.first,
                     sourceType = sourceType,
@@ -497,9 +599,8 @@ object AutoDiscoveryRepository {
                 }
                 val classified = classifyMediaByName(finalName, ct) ?: (MediaKind.VIDEO to false)
                 val itemKey = sha256(rawUrl)
-                mediaMap[itemKey] = RemoteMediaItem(
+                mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
-                    title = formatTitle(finalName),
                     fileName = finalName,
                     kind = classified.first,
                     sourceType = sourceType,
@@ -617,9 +718,8 @@ object AutoDiscoveryRepository {
             if (classified != null) {
                 val rawUrl = buildRawGitHubUrl(loc.owner, loc.repo, branch, loc.subPath)
                 val itemKey = sha256(rawUrl)
-                mediaMap[itemKey] = RemoteMediaItem(
+                mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
-                    title = formatTitle(fName),
                     fileName = fName,
                     kind = classified.first,
                     sourceType = SourceType.GITHUB,
@@ -689,15 +789,13 @@ object AutoDiscoveryRepository {
             val classified = classifyMediaByName(fName) ?: continue
             val rawUrl = buildRawGitHubUrl(loc.owner, loc.repo, branch, b.path)
             val thumbUrl = if (classified.first == MediaKind.VIDEO) {
-                val baseNoExt = lower.substringBeforeLast('.')
-                thumbByTargetName[lower] ?: thumbByTargetName[baseNoExt]
+                resolveMultiUseThumbnail(fName, thumbByTargetName)
             } else {
                 null
             }
             val itemKey = sha256(rawUrl)
-            mediaMap[itemKey] = RemoteMediaItem(
+            mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
-                title = formatTitle(fName),
                 fileName = fName,
                 kind = classified.first,
                 sourceType = SourceType.GITHUB,
@@ -767,9 +865,7 @@ object AutoDiscoveryRepository {
             postMap = postMap
         )
         for (v in pendingVideos) {
-            val lower = v.fileName.lowercase()
-            val baseNoExt = lower.substringBeforeLast('.')
-            val resolvedThumb = thumbByTargetName[lower] ?: thumbByTargetName[baseNoExt]
+            val resolvedThumb = resolveMultiUseThumbnail(v.fileName, thumbByTargetName)
             mediaMap[v.id] = v.copy(thumbnailUrl = resolvedThumb)
         }
     }
@@ -829,9 +925,8 @@ object AutoDiscoveryRepository {
             }
             val classified = classifyMediaByName(name) ?: continue
             val itemKey = "gdrive_$fid"
-            val item = RemoteMediaItem(
+            val item = buildMediaItem(
                 id = itemKey,
-                title = formatTitle(name),
                 fileName = name,
                 kind = classified.first,
                 sourceType = SourceType.GDRIVE,
@@ -901,130 +996,84 @@ object AutoDiscoveryRepository {
         return runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
     }
 
-    fun decodeLocalMediaBitmap(file: File): Bitmap? {
-        return runCatching {
-            BufferedInputStream(FileInputStream(file), 65_536).use { bis ->
-                bis.mark(16)
-                val magic = ByteArray(4)
-                val n = bis.read(magic)
-                val mStr = if (n == 4) String(magic, Charsets.US_ASCII) else ""
-                bis.reset()
-                if (mStr == "SVCV" || mStr == "SICV") {
-                    val info = LocalStreamServer.parseContainerHeaderFromStream(bis)
-                    if (info.compression == 0) {
-                        BitmapFactory.decodeStream(bis)
-                    } else {
-                        ZstdDecompressInputStream(bis).use { zstdStream ->
-                            BitmapFactory.decodeStream(zstdStream)
-                        }
-                    }
-                } else {
-                    BitmapFactory.decodeStream(bis)
-                }
-            }
-        }.getOrNull()
-    }
-
-    suspend fun loadBestImageBitmap(context: Context, item: RemoteMediaItem): Bitmap? =
-        withContext(Dispatchers.IO) {
-            val localFile = AppStorageManager.findDownloadedFile(context, item)
-            if (localFile != null) {
-                decodeLocalMediaBitmap(localFile)?.let { return@withContext it }
-            }
-            streamFullImageBitmap(item)
-        }
-
     suspend fun loadThumbnailBitmap(context: Context, item: RemoteMediaItem): Bitmap? =
         withContext(Dispatchers.IO) {
-            memoryThumbs.get(item.id)?.let { return@withContext it }
-            if (failedThumbs.contains(item.id)) return@withContext null
+            memoryThumbs[item.id]?.let { return@withContext it }
+
+            val thumbKey = item.thumbnailUrl?.let { "thumb_${sha256(it)}" } ?: sha256(item.id)
+            if (item.thumbnailUrl != null) {
+                memoryThumbs[thumbKey]?.let { shared ->
+                    memoryThumbs[item.id] = shared
+                    return@withContext shared
+                }
+            }
 
             val thumbDir = File(context.cacheDir, "althub_thumbs").apply { mkdirs() }
-            val cacheFile = File(thumbDir, "${sha256(item.id)}.png")
+            val cacheFile = File(thumbDir, "$thumbKey.png")
             if (cacheFile.exists() && cacheFile.length() > 0L) {
                 val diskBmp = runCatching { BitmapFactory.decodeFile(cacheFile.absolutePath) }.getOrNull()
                 if (diskBmp != null) {
-                    memoryThumbs.put(item.id, diskBmp)
+                    memoryThumbs[item.id] = diskBmp
+                    memoryThumbs[thumbKey] = diskBmp
                     return@withContext diskBmp
                 }
             }
 
-            thumbSemaphore.withPermit {
-                memoryThumbs.get(item.id)?.let { return@withPermit it }
-                if (failedThumbs.contains(item.id)) return@withPermit null
-                if (cacheFile.exists() && cacheFile.length() > 0L) {
-                    val diskBmp = runCatching { BitmapFactory.decodeFile(cacheFile.absolutePath) }.getOrNull()
-                    if (diskBmp != null) {
-                        memoryThumbs.put(item.id, diskBmp)
-                        return@withPermit diskBmp
+            if (item.thumbnailUrl != null) {
+                val bytes = downloadBytes(item.thumbnailUrl, extraHeaders = item.headers)
+                if (bytes != null && bytes.isNotEmpty()) {
+                    val bmp = decodeSampledBitmap(bytes)
+                    if (bmp != null) {
+                        memoryThumbs[item.id] = bmp
+                        memoryThumbs[thumbKey] = bmp
+                        saveBitmapCache(bmp, cacheFile)
+                        return@withContext bmp
                     }
                 }
+            }
 
-                val localFile = AppStorageManager.findDownloadedFile(context, item)
-                if (localFile != null) {
-                    if (item.kind == MediaKind.IMAGE) {
-                        val localBmp = decodeLocalMediaBitmap(localFile)
-                        if (localBmp != null) {
-                            val scaled = scaleDown(localBmp)
-                            memoryThumbs.put(item.id, scaled)
-                            saveBitmapCache(scaled, cacheFile)
-                            return@withPermit scaled
-                        }
-                    } else {
-                        val localFrame = if (localFile.name.endsWith(".vcv", ignoreCase = true)) {
-                            extractVideoFrameFromUrl(LocalStreamServer.getLocalStreamUrl(item, localFile))
-                        } else {
-                            extractVideoFrameFromFile(localFile)
-                        }
-                        if (localFrame != null) {
-                            val scaled = scaleDown(localFrame)
-                            memoryThumbs.put(item.id, scaled)
-                            saveBitmapCache(scaled, cacheFile)
-                            return@withPermit scaled
-                        }
-                    }
-                }
-
-                if (item.thumbnailUrl != null) {
-                    val bytes = downloadBytes(item.thumbnailUrl, extraHeaders = item.headers)
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val bmp = decodeSampledBitmap(bytes)
-                        if (bmp != null) {
-                            memoryThumbs.put(item.id, bmp)
-                            saveBitmapCache(bmp, cacheFile)
-                            return@withPermit bmp
-                        }
-                    }
-                }
-
-                if (item.kind == MediaKind.IMAGE) {
-                    val fullBmp = streamFullImageBitmap(item)
-                    if (fullBmp == null) {
-                        failedThumbs.add(item.id)
-                        return@withPermit null
-                    }
-                    val scaled = scaleDown(fullBmp)
-                    memoryThumbs.put(item.id, scaled)
-                    saveBitmapCache(scaled, cacheFile)
-                    scaled
-                } else {
-                    val streamUrl = LocalStreamServer.getStreamUrl(item)
-                    val frame = extractVideoFrameFromUrl(streamUrl)
-                    if (frame == null) {
-                        failedThumbs.add(item.id)
-                        return@withPermit null
-                    }
-                    val scaled = scaleDown(frame)
-                    memoryThumbs.put(item.id, scaled)
-                    saveBitmapCache(scaled, cacheFile)
-                    scaled
-                }
+            if (item.kind == MediaKind.IMAGE) {
+                val fullBmp = streamFullImageBitmap(item) ?: return@withContext null
+                val scaled = scaleDown(fullBmp)
+                memoryThumbs[item.id] = scaled
+                saveBitmapCache(scaled, cacheFile)
+                scaled
+            } else {
+                val streamUrl = LocalStreamServer.getStreamUrl(item)
+                val frame = extractVideoFrameFromUrl(streamUrl) ?: return@withContext null
+                val scaled = scaleDown(frame)
+                memoryThumbs[item.id] = scaled
+                saveBitmapCache(scaled, cacheFile)
+                scaled
             }
         }
 
     suspend fun streamFullImageBitmap(item: RemoteMediaItem): Bitmap? =
         withContext(Dispatchers.IO) {
             runCatching {
+                val localPath = item.localPath
+                if (!localPath.isNullOrBlank()) {
+                    val localFile = File(localPath)
+                    if (!localFile.exists()) return@runCatching null
+                    BufferedInputStream(localFile.inputStream(), 65_536).use { bis ->
+                        bis.mark(16)
+                        val magic = ByteArray(4)
+                        val n = bis.read(magic)
+                        val mStr = if (n == 4) String(magic, Charsets.US_ASCII) else ""
+                        bis.reset()
+                        return@runCatching if (mStr == "SVCV" || mStr == "SICV") {
+                            val info = LocalStreamServer.parseContainerHeaderFromStream(bis)
+                            if (info.compression == 0) {
+                                BitmapFactory.decodeStream(bis)
+                            } else {
+                                ZstdDecompressInputStream(bis).use { BitmapFactory.decodeStream(it) }
+                            }
+                        } else {
+                            BitmapFactory.decodeStream(bis)
+                        }
+                    }
+                }
+
                 val conn = LocalStreamServer.openRemoteConnection(
                     startUrl = item.mediaUrl,
                     extraHeaders = item.headers
@@ -1055,20 +1104,6 @@ object AutoDiscoveryRepository {
                 }
             }.getOrNull()
         }
-
-    private fun extractVideoFrameFromFile(file: File): Bitmap? {
-        return try {
-            val mmr = MediaMetadataRetriever()
-            try {
-                mmr.setDataSource(file.absolutePath)
-                mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            } finally {
-                runCatching { mmr.release() }
-            }
-        } catch (_: Throwable) {
-            null
-        }
-    }
 
     private fun extractVideoFrameFromUrl(streamUrl: String): Bitmap? {
         return try {
