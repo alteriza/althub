@@ -13,6 +13,39 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Generate App Icons from icon.png
+        run: |
+          python3 -m pip install --quiet --break-system-packages pillow || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil)
+          python3 - << 'EOF'
+          import os
+          from PIL import Image, ImageDraw
+
+          src = Image.open("icon.png").convert("RGBA")
+          os.makedirs("app/src/main/res/drawable", exist_ok=True)
+          src.save("app/src/main/res/drawable/ic_althub_logo.png")
+
+          densities = {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }
+
+          for folder, size in densities.items():
+              out_dir = f"app/src/main/res/{folder}"
+              os.makedirs(out_dir, exist_ok=True)
+              resized = src.resize((size, size), Image.Resampling.LANCZOS)
+              resized.save(f"{out_dir}/ic_launcher.png")
+
+              mask = Image.new("L", (size, size), 0)
+              draw = ImageDraw.Draw(mask)
+              draw.ellipse((0, 0, size - 1, size - 1), fill=255)
+              round_img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+              round_img.paste(resized, (0, 0), mask=mask)
+              round_img.save(f"{out_dir}/ic_launcher_round.png")
+          EOF
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -32,16 +65,6 @@ jobs:
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
-
-      - name: Build Native Rust Library (libalthub_core.so)
-        working-directory: rust
-        run: |
-          cargo ndk \
-            -t armeabi-v7a \
-            -t arm64-v8a \
-            --platform 26 \
-            -o ../app/src/main/jniLibs \
-            build --release
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
