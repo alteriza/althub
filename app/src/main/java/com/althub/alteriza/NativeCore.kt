@@ -35,6 +35,19 @@ object NativeCore {
 
     external fun parseContainerHeaderBytes(input: ByteArray, inputLen: Int): String?
 
+    external fun parseVcvSeekTable(
+        tailBytes: ByteArray,
+        tailLen: Int,
+        fileSize: Long,
+        headerOffset: Long
+    ): String?
+
+    external fun decompressZstdBlock(
+        input: ByteArray,
+        inputLen: Int,
+        expectedSize: Int
+    ): ByteArray?
+
     external fun readHeader(inputPath: String): String?
 
     external fun decodeToFile(inputPath: String, outputPath: String): Int

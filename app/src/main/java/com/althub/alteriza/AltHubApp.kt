@@ -7,16 +7,24 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.media.AudioManager
-import android.media.MediaPlayer
-import android.media.PlaybackParams
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
-import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
-import android.widget.VideoView
+import androidx.annotation.OptIn
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -735,9 +743,8 @@ fun AltHubApp() {
                                         )
                                     }
                                 } else {
-                                    itemsIndexed(allVideos, key = { _, item -> item.id }) { idx, video ->
+                                    items(allVideos, key = { it.id }) { video ->
                                         VideoStreamCard(
-                                            indexNumber = allVideos.size - idx,
                                             item = video,
                                             onWatch = { openMedia(video) },
                                             onDownload = { requestDownload(video) }
@@ -2186,7 +2193,6 @@ private fun SocialStreamPostCard(
 
 @Composable
 private fun VideoStreamCard(
-    indexNumber: Int,
     item: RemoteMediaItem,
     onWatch: () -> Unit,
     onDownload: () -> Unit
@@ -2230,27 +2236,6 @@ private fun VideoStreamCard(
                     strokeWidth = 1.5.dp,
                     modifier = Modifier.size(22.dp)
                 )
-            }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(10.dp)
-                    .background(BbBlack.copy(alpha = 0.85f))
-                    .border(1.dp, BbBorderBright)
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(5.dp).background(BbOrange))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "VIDEO #%02d".format(indexNumber),
-                        color = BbWhite,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp
-                    )
-                }
             }
 
             Box(
@@ -2638,6 +2623,7 @@ private fun EmptyFeedBox(
     }
 }
 
+@OptIn(UnstableApi::class)
 @Composable
 private fun CubicStreamingVideoPlayer(
     item: RemoteMediaItem,
@@ -2655,14 +2641,12 @@ private fun CubicStreamingVideoPlayer(
 
     var retryTick by remember { mutableIntStateOf(0) }
     var playableUri by remember(item.id, item.localPath, retryTick) { mutableStateOf<Uri?>(null) }
-    var prepError by remember(item.id, item.localPath, retryTick) { mutableStateOf<String?>(null) }
 
-    var videoView by remember { mutableStateOf<VideoView?>(null) }
-    var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableIntStateOf(0) }
     var durationMs by remember { mutableIntStateOf(1) }
     var ready by remember { mutableStateOf(false) }
+    var isBuffering by remember { mutableStateOf(true) }
     var hasError by remember { mutableStateOf(false) }
     var errorDetail by remember { mutableStateOf("") }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -2679,20 +2663,91 @@ private fun CubicStreamingVideoPlayer(
     var gestureBadge by remember { mutableStateOf<String?>(null) }
     var brightnessLevel by remember { mutableFloatStateOf(0.5f) }
 
+    val exoPlayer = remember(item.id, hwAcceleration, retryTick) {
+        val renderersFactory = DefaultRenderersFactory(context).apply {
+            setEnableDecoderFallback(true)
+            setExtensionRendererMode(
+                if (hwAcceleration) DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                else DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF
+            )
+        }
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(2500, 15000, 1000, 2000)
+            .build()
+        ExoPlayer.Builder(context, renderersFactory)
+            .setLoadControl(loadControl)
+            .build()
+    }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                when (state) {
+                    Player.STATE_BUFFERING -> {
+                        isBuffering = true
+                    }
+                    Player.STATE_READY -> {
+                        isBuffering = false
+                        ready = true
+                        hasError = false
+                        durationMs = exoPlayer.duration.coerceAtLeast(1L).toInt()
+                    }
+                    Player.STATE_ENDED -> {
+                        isBuffering = false
+                        if (!isLooping) {
+                            isPlaying = false
+                            positionMs = durationMs
+                            controlsVisible = true
+                        }
+                    }
+                    else -> {}
+                }
+            }
+
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
+                if (playing) interactionTick++
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    onOrientationResolved(videoSize.width > videoSize.height)
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                isBuffering = false
+                hasError = true
+                errorDetail = "PLAYER ERROR (${error.errorCodeName})"
+                controlsVisible = true
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }
+    }
+
     LaunchedEffect(item.id, item.localPath, retryTick) {
         ready = false
+        isBuffering = true
         hasError = false
         errorDetail = ""
         playableUri = null
-        prepError = null
         runCatching {
             LocalStreamServer.preparePlayableUri(context, item)
         }.onSuccess { uri ->
             playableUri = uri
+            exoPlayer.setMediaItem(MediaItem.fromUri(uri))
+            exoPlayer.repeatMode = if (isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            exoPlayer.volume = if (isMuted) 0f else 1f
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = true
         }.onFailure { err ->
-            prepError = err.message ?: "Failed to prepare stream"
+            isBuffering = false
             hasError = true
-            errorDetail = prepError.orEmpty()
+            errorDetail = err.message ?: "Failed to prepare stream"
             controlsVisible = true
         }
     }
@@ -2711,23 +2766,15 @@ private fun CubicStreamingVideoPlayer(
         }
     }
 
-    LaunchedEffect(videoView) {
+    LaunchedEffect(exoPlayer) {
         while (true) {
-            val vv = videoView
-            if (vv != null && ready && !isSeeking) {
-                positionMs = vv.currentPosition.coerceAtLeast(0)
-                if (positionMs >= durationMs - 400 && !vv.isPlaying && !isLooping) {
-                    isPlaying = false
-                }
+            if (ready && !isSeeking) {
+                positionMs = exoPlayer.currentPosition.coerceAtLeast(0L).toInt()
+                val dur = exoPlayer.duration
+                if (dur > 0L) durationMs = dur.toInt()
             }
-            delay(300L)
+            delay(250L)
         }
-    }
-
-    val scaleMod = when (resizeMode) {
-        VideoResizeMode.FIT -> Modifier.fillMaxSize()
-        VideoResizeMode.FILL -> Modifier.fillMaxSize().graphicsLayer(scaleX = 1.28f, scaleY = 1.28f)
-        VideoResizeMode.STRETCH -> Modifier.fillMaxSize().graphicsLayer(scaleX = 1.15f, scaleY = 0.92f)
     }
 
     Box(
@@ -2742,17 +2789,16 @@ private fun CubicStreamingVideoPlayer(
                     },
                     onDoubleTap = { offset ->
                         if (controlsLocked) return@detectTapGestures
-                        val vv = videoView ?: return@detectTapGestures
                         val half = size.width / 2f
                         if (offset.x < half) {
-                            val next = (vv.currentPosition - 10_000).coerceAtLeast(0)
-                            vv.seekTo(next)
-                            positionMs = next
+                            val next = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
+                            exoPlayer.seekTo(next)
+                            positionMs = next.toInt()
                             gestureBadge = "-10s"
                         } else {
-                            val next = (vv.currentPosition + 10_000).coerceAtMost(durationMs)
-                            vv.seekTo(next)
-                            positionMs = next
+                            val next = (exoPlayer.currentPosition + 10_000L).coerceAtMost(durationMs.toLong())
+                            exoPlayer.seekTo(next)
+                            positionMs = next.toInt()
                             gestureBadge = "+10s"
                         }
                         interactionTick++
@@ -2784,67 +2830,34 @@ private fun CubicStreamingVideoPlayer(
                 }
             }
     ) {
-        val activeUri = playableUri
-        if (activeUri != null) {
+        if (playableUri != null) {
             AndroidView(
                 factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
+                    PlayerView(ctx).apply {
+                        layoutParams = FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        val vv = VideoView(ctx).apply {
-                            layoutParams = FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                Gravity.CENTER
-                            )
-                            keepScreenOn = true
-                            setOnPreparedListener { mp ->
-                                mediaPlayerRef = mp
-                                durationMs = mp.duration.coerceAtLeast(1)
-                                ready = true
-                                hasError = false
-                                mp.isLooping = isLooping
-                                if (isMuted) mp.setVolume(0f, 0f) else mp.setVolume(1f, 1f)
-                                if (mp.videoWidth > 0 && mp.videoHeight > 0) {
-                                    onOrientationResolved(mp.videoWidth > mp.videoHeight)
-                                }
-                                start()
-                                isPlaying = true
-                                interactionTick++
-                            }
-                            setOnCompletionListener {
-                                if (!isLooping) {
-                                    isPlaying = false
-                                    positionMs = durationMs
-                                    controlsVisible = true
-                                }
-                            }
-                            setOnErrorListener { _, what, extra ->
-                                hasError = true
-                                errorDetail = "PLAYER ERROR ($what / $extra)"
-                                controlsVisible = true
-                                true
-                            }
-                        }
-                        videoView = vv
-                        addView(vv)
+                        useController = false
+                        keepScreenOn = true
+                        player = exoPlayer
                     }
                 },
-                update = { container ->
-                    val vv = container.getChildAt(0) as? VideoView ?: return@AndroidView
-                    val targetKey = "${activeUri}_$retryTick"
-                    if (vv.tag != targetKey) {
-                        vv.tag = targetKey
-                        vv.setVideoURI(activeUri)
+                update = { pv ->
+                    if (pv.player !== exoPlayer) {
+                        pv.player = exoPlayer
+                    }
+                    pv.resizeMode = when (resizeMode) {
+                        VideoResizeMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        VideoResizeMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        VideoResizeMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
                     }
                 },
-                modifier = scaleMod
+                modifier = Modifier.fillMaxSize()
             )
         }
 
-        if (!ready && !hasError) {
+        if ((!ready || isBuffering) && !hasError) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -3024,10 +3037,9 @@ private fun CubicStreamingVideoPlayer(
                                 icon = Icons.Default.Replay10,
                                 active = false,
                                 onClick = {
-                                    val vv = videoView ?: return@CubicSquareIconButton
-                                    val next = (vv.currentPosition - 10_000).coerceAtLeast(0)
-                                    vv.seekTo(next)
-                                    positionMs = next
+                                    val next = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
+                                    exoPlayer.seekTo(next)
+                                    positionMs = next.toInt()
                                     interactionTick++
                                 }
                             )
@@ -3036,13 +3048,10 @@ private fun CubicStreamingVideoPlayer(
                                 icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                 primary = true,
                                 onClick = {
-                                    val vv = videoView ?: return@CubicActionButton
-                                    if (vv.isPlaying) {
-                                        vv.pause()
-                                        isPlaying = false
+                                    if (exoPlayer.isPlaying) {
+                                        exoPlayer.pause()
                                     } else {
-                                        vv.start()
-                                        isPlaying = true
+                                        exoPlayer.play()
                                     }
                                     interactionTick++
                                 }
@@ -3051,10 +3060,9 @@ private fun CubicStreamingVideoPlayer(
                                 icon = Icons.Default.Forward10,
                                 active = false,
                                 onClick = {
-                                    val vv = videoView ?: return@CubicSquareIconButton
-                                    val next = (vv.currentPosition + 10_000).coerceAtMost(durationMs)
-                                    vv.seekTo(next)
-                                    positionMs = next
+                                    val next = (exoPlayer.currentPosition + 10_000L).coerceAtMost(durationMs.toLong())
+                                    exoPlayer.seekTo(next)
+                                    positionMs = next.toInt()
                                     interactionTick++
                                 }
                             )
@@ -3075,7 +3083,7 @@ private fun CubicStreamingVideoPlayer(
                                 onValueChange = { v ->
                                     isSeeking = true
                                     positionMs = v.toInt()
-                                    videoView?.seekTo(positionMs)
+                                    exoPlayer.seekTo(positionMs.toLong())
                                 },
                                 onValueChangeFinished = {
                                     isSeeking = false
@@ -3109,8 +3117,7 @@ private fun CubicStreamingVideoPlayer(
                                 active = isMuted,
                                 onClick = {
                                     isMuted = !isMuted
-                                    val vol = if (isMuted) 0f else 1f
-                                    runCatching { mediaPlayerRef?.setVolume(vol, vol) }
+                                    exoPlayer.volume = if (isMuted) 0f else 1f
                                     interactionTick++
                                 }
                             )
@@ -3120,12 +3127,7 @@ private fun CubicStreamingVideoPlayer(
                                 primary = speedIndex != 1,
                                 onClick = {
                                     speedIndex = (speedIndex + 1) % speeds.size
-                                    val spd = speeds[speedIndex]
-                                    runCatching {
-                                        mediaPlayerRef?.let { mp ->
-                                            mp.playbackParams = PlaybackParams().setSpeed(spd)
-                                        }
-                                    }
+                                    exoPlayer.playbackParameters = PlaybackParameters(speeds[speedIndex])
                                     interactionTick++
                                 }
                             )
@@ -3134,7 +3136,7 @@ private fun CubicStreamingVideoPlayer(
                                 active = isLooping,
                                 onClick = {
                                     isLooping = !isLooping
-                                    runCatching { mediaPlayerRef?.isLooping = isLooping }
+                                    exoPlayer.repeatMode = if (isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                                     gestureBadge = if (isLooping) "LOOP ON" else "LOOP OFF"
                                     interactionTick++
                                 }

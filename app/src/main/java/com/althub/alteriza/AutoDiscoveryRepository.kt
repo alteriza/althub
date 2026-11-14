@@ -1039,6 +1039,9 @@ object AutoDiscoveryRepository {
                 saveBitmapCache(scaled, cacheFile)
                 scaled
             } else {
+                if (item.isContainer && item.localPath == null && !LocalStreamServer.canFastSeekStream(item)) {
+                    return@withContext null
+                }
                 val streamUrl = LocalStreamServer.getStreamUrl(item)
                 val frame = extractVideoFrameFromUrl(streamUrl) ?: return@withContext null
                 val scaled = scaleDown(frame)

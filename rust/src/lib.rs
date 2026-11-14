@@ -6,11 +6,15 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
+use zstd::bulk;
 use zstd::stream::raw::{Decoder, Operation};
 
 const MAGIC_VIDEO: &[u8; 4] = b"SVCV";
 const MAGIC_IMAGE: &[u8; 4] = b"SICV";
 const BUF_CAP: usize = 262_144;
+const VIDEO_CHUNK_SIZE: usize = 262_144;
+const SEEK_FRAME_MAGIC: u32 = 0x184D2A5E;
+const SEEK_TABLE_MAGIC: u32 = 0x8F92EAB1;
 
 fn xor_decode(encoded: &[u8], key: u8) -> String {
     let mut out = Vec::with_capacity(encoded.len());
@@ -44,6 +48,7 @@ struct Header {
     compression: u8,
     original_ext: String,
     original_size: u64,
+    chunk_size: u32,
 }
 
 #[derive(Serialize)]
@@ -52,6 +57,23 @@ struct ParsedHeaderResponse {
     compression: u8,
     original_ext: String,
     original_size: u64,
+    chunk_size: u32,
+}
+
+#[derive(Serialize)]
+struct SeekChunkEntry {
+    index: usize,
+    comp_offset: u64,
+    comp_size: u32,
+    decomp_offset: u64,
+    decomp_size: u32,
+}
+
+#[derive(Serialize)]
+struct SeekTableResponse {
+    chunk_size: u32,
+    total_decompressed_size: u64,
+    chunks: Vec<SeekChunkEntry>,
 }
 
 #[derive(Serialize)]
@@ -154,11 +176,13 @@ fn encode_from_file(
         .and_then(|s| s.to_str())
         .unwrap_or("bin")
         .to_string();
+    let use_chunked = is_video && compression > 0;
     let header = Header {
         format: if is_video { "video".into() } else { "image".into() },
         compression,
         original_ext: ext,
         original_size: metadata.len(),
+        chunk_size: if use_chunked { VIDEO_CHUNK_SIZE as u32 } else { 0 },
     };
     let header_json = match serde_json::to_vec(&header) {
         Ok(j) => j,
@@ -190,7 +214,53 @@ fn encode_from_file(
             4 => 12,
             _ => 19,
         };
-        if zstd::stream::copy_encode(&mut reader, &mut writer, level).is_err() {
+        if use_chunked {
+            let mut seek_entries: Vec<(u32, u32)> = Vec::new();
+            let mut chunk_buf = vec![0u8; VIDEO_CHUNK_SIZE];
+            loop {
+                let mut filled = 0usize;
+                while filled < VIDEO_CHUNK_SIZE {
+                    match reader.read(&mut chunk_buf[filled..]) {
+                        Ok(0) => break,
+                        Ok(n) => filled += n,
+                        Err(_) => return -16,
+                    }
+                }
+                if filled == 0 {
+                    break;
+                }
+                let compressed = match bulk::compress(&chunk_buf[..filled], level) {
+                    Ok(c) => c,
+                    Err(_) => return -12,
+                };
+                if writer.write_all(&compressed).is_err() {
+                    return -16;
+                }
+                seek_entries.push((compressed.len() as u32, filled as u32));
+            }
+            let num_chunks = seek_entries.len() as u32;
+            let frame_size = num_chunks * 8 + 8;
+            if writer.write_all(&SEEK_FRAME_MAGIC.to_le_bytes()).is_err() {
+                return -16;
+            }
+            if writer.write_all(&frame_size.to_le_bytes()).is_err() {
+                return -16;
+            }
+            for (c_sz, d_sz) in &seek_entries {
+                if writer.write_all(&c_sz.to_le_bytes()).is_err() {
+                    return -16;
+                }
+                if writer.write_all(&d_sz.to_le_bytes()).is_err() {
+                    return -16;
+                }
+            }
+            if writer.write_all(&num_chunks.to_le_bytes()).is_err() {
+                return -16;
+            }
+            if writer.write_all(&SEEK_TABLE_MAGIC.to_le_bytes()).is_err() {
+                return -16;
+            }
+        } else if zstd::stream::copy_encode(&mut reader, &mut writer, level).is_err() {
             return -12;
         }
     }
@@ -510,9 +580,158 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_parseContainerHeaderB
         compression: header.compression,
         original_ext: header.original_ext,
         original_size: header.original_size,
+        chunk_size: header.chunk_size,
     };
     let json = serde_json::to_string(&resp).unwrap_or_default();
     env.new_string(json).unwrap_or_default().into_raw()
+}
+
+fn try_parse_seek_footer(
+    tail: &[u8],
+    file_size: u64,
+    header_offset: u64,
+    footer_len: usize,
+) -> Option<SeekTableResponse> {
+    if tail.len() < 8 + footer_len {
+        return None;
+    }
+    let len = tail.len();
+    let magic = u32::from_le_bytes([tail[len - 4], tail[len - 3], tail[len - 2], tail[len - 1]]);
+    if magic != SEEK_TABLE_MAGIC {
+        return None;
+    }
+    let num_pos = len - footer_len;
+    let num_chunks = u32::from_le_bytes([
+        tail[num_pos],
+        tail[num_pos + 1],
+        tail[num_pos + 2],
+        tail[num_pos + 3],
+    ]) as usize;
+    if num_chunks == 0 || num_chunks > 262_144 {
+        return None;
+    }
+    let frame_size = num_chunks * 8 + footer_len;
+    let total_frame_bytes = frame_size + 8;
+    if len < total_frame_bytes {
+        return None;
+    }
+    let start = len - total_frame_bytes;
+    let frame_magic = u32::from_le_bytes([
+        tail[start],
+        tail[start + 1],
+        tail[start + 2],
+        tail[start + 3],
+    ]);
+    let declared_size = u32::from_le_bytes([
+        tail[start + 4],
+        tail[start + 5],
+        tail[start + 6],
+        tail[start + 7],
+    ]) as usize;
+    if frame_magic != SEEK_FRAME_MAGIC || declared_size != frame_size {
+        return None;
+    }
+
+    let mut entries = Vec::with_capacity(num_chunks);
+    let mut comp_cursor = header_offset;
+    let mut decomp_cursor = 0u64;
+    let mut inferred_chunk_size = 0u32;
+    let entries_base = start + 8;
+
+    for i in 0..num_chunks {
+        let p = entries_base + i * 8;
+        let c_sz = u32::from_le_bytes([tail[p], tail[p + 1], tail[p + 2], tail[p + 3]]);
+        let d_sz = u32::from_le_bytes([tail[p + 4], tail[p + 5], tail[p + 6], tail[p + 7]]);
+        if i == 0 {
+            inferred_chunk_size = d_sz;
+        }
+        entries.push(SeekChunkEntry {
+            index: i,
+            comp_offset: comp_cursor,
+            comp_size: c_sz,
+            decomp_offset: decomp_cursor,
+            decomp_size: d_sz,
+        });
+        comp_cursor += c_sz as u64;
+        decomp_cursor += d_sz as u64;
+    }
+
+    if file_size > 0 && comp_cursor + (total_frame_bytes as u64) != file_size {
+        return None;
+    }
+
+    Some(SeekTableResponse {
+        chunk_size: if inferred_chunk_size > 0 {
+            inferred_chunk_size
+        } else {
+            VIDEO_CHUNK_SIZE as u32
+        },
+        total_decompressed_size: decomp_cursor,
+        chunks: entries,
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_parseVcvSeekTable(
+    env: JNIEnv,
+    _this: JObject,
+    tail_bytes: JByteArray,
+    tail_len: jint,
+    file_size: jlong,
+    header_offset: jlong,
+) -> jstring {
+    if tail_len < 16 || header_offset < 8 {
+        return std::ptr::null_mut();
+    }
+    let bytes = match env.convert_byte_array(tail_bytes) {
+        Ok(b) => b,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let valid_len = (tail_len as usize).min(bytes.len());
+    let slice = &bytes[..valid_len];
+    let f_size = file_size.max(0) as u64;
+    let h_off = header_offset.max(0) as u64;
+
+    let parsed = try_parse_seek_footer(slice, f_size, h_off, 8)
+        .or_else(|| try_parse_seek_footer(slice, f_size, h_off, 9));
+
+    match parsed {
+        Some(table) => {
+            let json = serde_json::to_string(&table).unwrap_or_default();
+            env.new_string(json).unwrap_or_default().into_raw()
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_decompressZstdBlock(
+    env: JNIEnv,
+    _this: JObject,
+    input: JByteArray,
+    input_len: jint,
+    expected_size: jint,
+) -> jbyteArray {
+    if input_len <= 0 {
+        return std::ptr::null_mut();
+    }
+    let in_bytes = match env.convert_byte_array(input) {
+        Ok(b) => b,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let valid_len = (input_len as usize).min(in_bytes.len());
+    let cap = if expected_size > 0 {
+        (expected_size as usize).min(16 * 1024 * 1024)
+    } else {
+        VIDEO_CHUNK_SIZE * 4
+    };
+    match bulk::decompress(&in_bytes[..valid_len], cap) {
+        Ok(out) => match env.byte_array_from_slice(&out) {
+            Ok(arr) => arr.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 #[no_mangle]

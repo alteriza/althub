@@ -35,9 +35,25 @@ import java.util.concurrent.atomic.AtomicReference
 object LocalStreamServer {
     private val itemsById = ConcurrentHashMap<String, RemoteMediaItem>()
     private val headersById = ConcurrentHashMap<String, ContainerHeaderInfo>()
+    private val seekTablesById = ConcurrentHashMap<String, VcvSeekTable>()
+    private val decompressedChunkCache = ConcurrentHashMap<String, ByteArray>()
     private val spoolJobs = ConcurrentHashMap<String, SpoolJob>()
     private val executor = Executors.newCachedThreadPool()
     private val spoolExecutor = Executors.newCachedThreadPool()
+
+    private data class SeekChunk(
+        val index: Int,
+        val compOffset: Long,
+        val compSize: Int,
+        val decompOffset: Long,
+        val decompSize: Int
+    )
+
+    private data class VcvSeekTable(
+        val chunkSize: Int,
+        val totalDecompressedSize: Long,
+        val chunks: List<SeekChunk>
+    )
 
     @Volatile
     private var appCacheDir: File? = null
@@ -101,6 +117,13 @@ object LocalStreamServer {
         itemsById[item.id] = item
         val p = ensureStarted()
         return "http://127.0.0.1:$p/stream?id=${item.id}"
+    }
+
+    fun canFastSeekStream(item: RemoteMediaItem): Boolean {
+        return runCatching {
+            val info = resolveHeader(item)
+            !info.isContainer || info.compression == 0 || seekTablesById.containsKey(item.id)
+        }.getOrDefault(false)
     }
 
     suspend fun preparePlayableUri(context: Context, item: RemoteMediaItem): Uri =
@@ -213,7 +236,15 @@ object LocalStreamServer {
 
                 val info = if (mStr == "SVCV" || mStr == "SICV") {
                     val parsed = parseContainerHeaderFromStream(bis)
-                    if (parsed.originalSize <= 0L && parsed.compression == 0 && fallbackTotal > parsed.headerOffset) {
+                    if (parsed.compression > 0 && fallbackTotal > parsed.headerOffset + 16L) {
+                        val table = fetchAndParseSeekTable(item, fallbackTotal, parsed.headerOffset)
+                        if (table != null) {
+                            seekTablesById[item.id] = table
+                            parsed.copy(originalSize = table.totalDecompressedSize)
+                        } else {
+                            parsed
+                        }
+                    } else if (parsed.originalSize <= 0L && parsed.compression == 0 && fallbackTotal > parsed.headerOffset) {
                         parsed.copy(originalSize = fallbackTotal - parsed.headerOffset)
                     } else {
                         parsed
@@ -227,7 +258,9 @@ object LocalStreamServer {
                         originalSize = fallbackTotal
                     )
                 }
-                headersById[item.id] = info
+                if (info.isContainer || info.originalSize > 0L) {
+                    headersById[item.id] = info
+                }
                 return info
             }
         } finally {
@@ -267,9 +300,13 @@ object LocalStreamServer {
 
                 val headerInfo = resolveHeader(item)
                 val mime = mimeTypeForExt(headerInfo.originalExt)
+                val seekTable = seekTablesById[item.id]
 
-                val useSpool = (headerInfo.isContainer && headerInfo.compression > 0) || headerInfo.originalSize <= 0L
-                if (useSpool) {
+                if (seekTable != null) {
+                    serveFromSeekTable(item, seekTable, mime, method, rangeValue, out) {
+                        headersSent = true
+                    }
+                } else if ((headerInfo.isContainer && headerInfo.compression > 0) || headerInfo.originalSize <= 0L) {
                     serveFromProgressiveSpool(item, headerInfo, mime, method, rangeValue, out) {
                         headersSent = true
                     }
@@ -492,14 +529,17 @@ object LocalStreamServer {
         }
 
         val sb = StringBuilder()
+        val effectiveEnd = if (isPartial) {
+            if (end >= start) end else (job.bytesWritten.get() - 1L).coerceAtLeast(start)
+        } else {
+            end
+        }
+
         if (isPartial) {
             val totalStr = if (effectiveTotal > 0L) effectiveTotal.toString() else "*"
-            val rangeEnd = if (end >= start) end else (job.bytesWritten.get() - 1L).coerceAtLeast(start)
             sb.append("HTTP/1.1 206 Partial Content\r\n")
-            sb.append("Content-Range: bytes $start-$rangeEnd/$totalStr\r\n")
-            if (end >= start) {
-                sb.append("Content-Length: ${end - start + 1L}\r\n")
-            }
+            sb.append("Content-Range: bytes $start-$effectiveEnd/$totalStr\r\n")
+            sb.append("Content-Length: ${effectiveEnd - start + 1L}\r\n")
         } else {
             sb.append("HTTP/1.1 200 OK\r\n")
             if (effectiveTotal > 0L) {
@@ -517,7 +557,7 @@ object LocalStreamServer {
 
         RandomAccessFile(job.file, "r").use { raf ->
             var cursor = start
-            val targetEnd = if (end >= start) end else Long.MAX_VALUE
+            val targetEnd = if (isPartial) effectiveEnd else if (end >= start) end else Long.MAX_VALUE
             val buf = ByteArray(65_536)
             while (cursor <= targetEnd) {
                 val avail = job.bytesWritten.get()
@@ -536,6 +576,173 @@ object LocalStreamServer {
             }
             out.flush()
         }
+    }
+
+    private fun fetchAndParseSeekTable(
+        item: RemoteMediaItem,
+        remoteFileSize: Long,
+        headerOffset: Long
+    ): VcvSeekTable? {
+        return runCatching {
+            val tailWindow = minOf(remoteFileSize - headerOffset, 65_536L)
+            if (tailWindow < 16L) return@runCatching null
+            val tailStart = remoteFileSize - tailWindow
+            val conn = openRemoteConnection(
+                startUrl = item.mediaUrl,
+                rangeHeader = "bytes=$tailStart-${remoteFileSize - 1L}",
+                extraHeaders = item.headers
+            )
+            try {
+                val tailBytes = conn.inputStream.use { it.readBytes() }
+                val json = NativeCore.parseVcvSeekTable(
+                    tailBytes,
+                    tailBytes.size,
+                    remoteFileSize,
+                    headerOffset
+                ) ?: return@runCatching null
+                val obj = JSONObject(json)
+                val cSize = obj.optInt("chunk_size", 262_144)
+                val totalDecomp = obj.optLong("total_decompressed_size", -1L)
+                val arr = obj.optJSONArray("chunks") ?: return@runCatching null
+                val list = ArrayList<SeekChunk>(arr.length())
+                for (i in 0 until arr.length()) {
+                    val c = arr.optJSONObject(i) ?: continue
+                    list.add(
+                        SeekChunk(
+                            index = c.optInt("index", i),
+                            compOffset = c.optLong("comp_offset"),
+                            compSize = c.optInt("comp_size"),
+                            decompOffset = c.optLong("decomp_offset"),
+                            decompSize = c.optInt("decomp_size")
+                        )
+                    )
+                }
+                if (list.isEmpty() || totalDecomp <= 0L) null else VcvSeekTable(cSize, totalDecomp, list)
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrNull()
+    }
+
+    private fun serveFromSeekTable(
+        item: RemoteMediaItem,
+        table: VcvSeekTable,
+        mime: String,
+        method: String,
+        rangeHeader: String?,
+        out: OutputStream,
+        onHeadersSent: () -> Unit
+    ) {
+        val totalSize = table.totalDecompressedSize
+        val parsedRange = parseRangeHeader(rangeHeader, totalSize)
+        val isPartial = parsedRange != null
+        val start = (parsedRange?.first ?: 0L).coerceIn(0L, totalSize - 1L)
+        val requestedEnd = parsedRange?.second ?: (totalSize - 1L)
+        val maxWindow = 2L * 1024L * 1024L
+        val end = if (requestedEnd < start) {
+            minOf(totalSize - 1L, start + maxWindow - 1L)
+        } else {
+            minOf(totalSize - 1L, minOf(requestedEnd, start + maxWindow - 1L))
+        }
+
+        val chunkSize = table.chunkSize.toLong().coerceAtLeast(1L)
+        val startIdx = (start / chunkSize).toInt().coerceIn(0, table.chunks.lastIndex)
+        val endIdx = (end / chunkSize).toInt().coerceIn(startIdx, table.chunks.lastIndex)
+
+        val sb = StringBuilder()
+        if (isPartial) {
+            sb.append("HTTP/1.1 206 Partial Content\r\n")
+            sb.append("Content-Range: bytes $start-$end/$totalSize\r\n")
+        } else {
+            sb.append("HTTP/1.1 200 OK\r\n")
+        }
+        sb.append("Content-Type: $mime\r\n")
+        sb.append("Accept-Ranges: bytes\r\n")
+        sb.append("Content-Length: ${end - start + 1L}\r\n")
+        sb.append("Connection: close\r\n\r\n")
+        out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        out.flush()
+        onHeadersSent()
+
+        if (method == "HEAD") return
+
+        var firstUncached = -1
+        var lastUncached = -1
+        for (idx in startIdx..endIdx) {
+            val key = "${item.id}_$idx"
+            if (!decompressedChunkCache.containsKey(key)) {
+                if (firstUncached == -1) firstUncached = idx
+                lastUncached = idx
+            }
+        }
+
+        if (firstUncached != -1) {
+            val cFirst = table.chunks[firstUncached]
+            val cLast = table.chunks[lastUncached]
+            val fetchStart = cFirst.compOffset
+            val fetchEnd = cLast.compOffset + cLast.compSize.toLong() - 1L
+            val conn = openRemoteConnection(
+                startUrl = item.mediaUrl,
+                rangeHeader = "bytes=$fetchStart-$fetchEnd",
+                extraHeaders = item.headers
+            )
+            try {
+                BufferedInputStream(conn.inputStream, 65_536).use { bis ->
+                    var streamCursor = fetchStart
+                    for (idx in firstUncached..lastUncached) {
+                        val chunk = table.chunks[idx]
+                        if (chunk.compOffset > streamCursor) {
+                            skipFully(bis, chunk.compOffset - streamCursor)
+                            streamCursor = chunk.compOffset
+                        }
+                        val compBuf = readExactBytes(bis, chunk.compSize)
+                        streamCursor += chunk.compSize.toLong()
+                        val decomp = NativeCore.decompressZstdBlock(compBuf, compBuf.size, chunk.decompSize)
+                            ?: throw IOException("Failed to decompress chunk $idx")
+                        if (decompressedChunkCache.size > 64) {
+                            decompressedChunkCache.clear()
+                        }
+                        decompressedChunkCache["${item.id}_$idx"] = decomp
+                    }
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+        for (idx in startIdx..endIdx) {
+            val chunk = table.chunks[idx]
+            val data = decompressedChunkCache["${item.id}_$idx"]
+                ?: throw IOException("Missing decoded chunk $idx")
+            val sliceStart = maxOf(0L, start - chunk.decompOffset).toInt()
+            val sliceEndExclusive = minOf(data.size.toLong(), end - chunk.decompOffset + 1L).toInt()
+            if (sliceEndExclusive > sliceStart) {
+                out.write(data, sliceStart, sliceEndExclusive - sliceStart)
+            }
+        }
+        out.flush()
+    }
+
+    private fun resolveDriveVirusConfirmUrl(html: String, baseUrl: String): String? {
+        val actionMatch = Regex("<form[^>]+id=[\"\']download-form[\"\'][^>]+action=[\"\']([^\"\']+)[\"\']", RegexOption.IGNORE_CASE)
+            .find(html)
+            ?: Regex("<form[^>]+action=[\"\']([^\"\']*usercontent\\.google\\.com[^\"\']*)[\"\']", RegexOption.IGNORE_CASE)
+                .find(html)
+            ?: return null
+        val rawAction = actionMatch.groupValues[1].replace("&amp;", "&")
+        val actionUrl = runCatching { URL(URL(baseUrl), rawAction).toString() }.getOrNull() ?: return null
+        val params = mutableListOf<String>()
+        val inputRegex = Regex("<input[^>]+type=[\"\']hidden[\"\'][^>]*>", RegexOption.IGNORE_CASE)
+        val nameRegex = Regex("name=[\"\']([^\"\']+)[\"\']", RegexOption.IGNORE_CASE)
+        val valRegex = Regex("value=[\"\']([^\"\']*)[\"\']", RegexOption.IGNORE_CASE)
+        for (tag in inputRegex.findAll(html)) {
+            val name = nameRegex.find(tag.value)?.groupValues?.get(1) ?: continue
+            val value = valRegex.find(tag.value)?.groupValues?.get(1)?.replace("&amp;", "&") ?: ""
+            params.add("${java.net.URLEncoder.encode(name, "UTF-8")}=${java.net.URLEncoder.encode(value, "UTF-8")}")
+        }
+        if (params.isEmpty()) return null
+        val sep = if (actionUrl.contains('?')) "&" else "?"
+        return actionUrl + sep + params.joinToString("&")
     }
 
     fun openRemoteConnection(
@@ -568,6 +775,14 @@ object LocalStreamServer {
         if (code !in 200..299) {
             conn.disconnect()
             throw IOException("HTTP $code")
+        }
+        val ct = conn.contentType.orEmpty().lowercase()
+        if (ct.contains("text/html") && (startUrl.contains("google.com") || startUrl.contains("googleusercontent.com"))) {
+            val html = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            val confirmedUrl = resolveDriveVirusConfirmUrl(html, startUrl)
+                ?: throw IOException("Google Drive HTML interstitial without confirm form")
+            return openRemoteConnection(confirmedUrl, rangeHeader, extraHeaders, hops + 1)
         }
         return conn
     }
