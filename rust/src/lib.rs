@@ -386,7 +386,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_getCornDisclaimerTitl
     env: JNIEnv,
     _this: JObject,
 ) -> jstring {
-    let title = obf_str!("CORN // NOTICE & DISCLAIMER", 0x69);
+    let title = obf_str!("CORN // ALERT", 0x69);
     env.new_string(title).unwrap_or_default().into_raw()
 }
 
@@ -396,7 +396,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_getCornDisclaimerMess
     _this: JObject,
 ) -> jstring {
     let msg = obf_str!(
-        "DISCLAIMER: Section CORN BUKAN konten dewasa (18+), NSFW, pornografi, atau hal serupa. Section ini adalah kanal arsip eksperimental dan koleksi privat terpisah di AltHub.",
+        "WARNING! ADULT ONLY.",
         0x51
     );
     env.new_string(msg).unwrap_or_default().into_raw()
@@ -407,7 +407,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_generateCornCaptcha(
     env: JNIEnv,
     _this: JObject,
 ) -> jstring {
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
     let mut code = String::with_capacity(6);
     for _ in 0..6 {
         let idx = (next_rand_u64() as usize) % CHARSET.len();
