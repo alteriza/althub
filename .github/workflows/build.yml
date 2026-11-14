@@ -186,56 +186,54 @@ jobs:
           fi
 
       # ---------------------------------------------------------------------
-      # SIGNING KEY: Generate baru jika secret kosong, atau pakai dari Secret
+      # SIGNING KEY: Auto-generate jika secret kosong, atau pakai dari Secrets
       # ---------------------------------------------------------------------
-      - name: Generate Signing Keystore (No Secret Found)
-        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 == '' }}
-        run: |
-          GEN_ALIAS="althub"
-          GEN_PASS=$(openssl rand -hex 12)
-          keytool -genkeypair -v \
-            -keystore release-keystore.jks \
-            -alias "$GEN_ALIAS" \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass "$GEN_PASS" \
-            -keypass "$GEN_PASS" \
-            -dname "CN=AltHub, OU=Alteriza, O=AltHub, L=Semarang, ST=Central Java, C=ID"
-
-          KEY_B64=$(base64 -w 0 release-keystore.jks)
-          {
-            echo "KEY_SOURCE=AUTO-GENERATED (Simpan ke Secrets agar update APK berikutnya kompatibel)"
-            echo "ACTIVE_KEY_ALIAS=$GEN_ALIAS"
-            echo "ACTIVE_STORE_PASS=$GEN_PASS"
-            echo "ACTIVE_KEY_PASS=$GEN_PASS"
-            echo "ACTIVE_KEYSTORE_B64<<EOF"
-            echo "$KEY_B64"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
-      - name: Load Signing Keystore from Secrets
-        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
+      - name: Prepare Signing Keystore
         env:
           SECRET_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           SECRET_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SECRET_STORE_PASS: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SECRET_KEY_PASS: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          printf '%s' "$SECRET_B64" | tr -d '\r\n ' | base64 -d > release-keystore.jks
-          RESOLVED_ALIAS="${SECRET_ALIAS:-althub}"
-          RESOLVED_STORE_PASS="${SECRET_STORE_PASS}"
-          RESOLVED_KEY_PASS="${SECRET_KEY_PASS:-$RESOLVED_STORE_PASS}"
+          if [ -z "$SECRET_B64" ]; then
+            GEN_ALIAS="althub"
+            GEN_PASS=$(openssl rand -hex 12)
+            keytool -genkeypair -v \
+              -keystore release-keystore.jks \
+              -alias "$GEN_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$GEN_PASS" \
+              -keypass "$GEN_PASS" \
+              -dname "CN=AltHub, OU=Alteriza, O=AltHub, L=Semarang, ST=Central Java, C=ID"
 
-          {
-            echo "KEY_SOURCE=GITHUB SECRETS"
-            echo "ACTIVE_KEY_ALIAS=$RESOLVED_ALIAS"
-            echo "ACTIVE_STORE_PASS=$RESOLVED_STORE_PASS"
-            echo "ACTIVE_KEY_PASS=$RESOLVED_KEY_PASS"
-            echo "ACTIVE_KEYSTORE_B64<<EOF"
-            echo "$SECRET_B64"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+            KEY_B64=$(base64 -w 0 release-keystore.jks)
+            {
+              echo "KEY_SOURCE=AUTO-GENERATED (Simpan ke Secrets agar update APK berikutnya kompatibel)"
+              echo "ACTIVE_KEY_ALIAS=$GEN_ALIAS"
+              echo "ACTIVE_STORE_PASS=$GEN_PASS"
+              echo "ACTIVE_KEY_PASS=$GEN_PASS"
+              echo "ACTIVE_KEYSTORE_B64<<EOF"
+              echo "$KEY_B64"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          else
+            printf '%s' "$SECRET_B64" | tr -d '\r\n ' | base64 -d > release-keystore.jks
+            RESOLVED_ALIAS="${SECRET_ALIAS:-althub}"
+            RESOLVED_STORE_PASS="${SECRET_STORE_PASS}"
+            RESOLVED_KEY_PASS="${SECRET_KEY_PASS:-$RESOLVED_STORE_PASS}"
+
+            {
+              echo "KEY_SOURCE=GITHUB SECRETS"
+              echo "ACTIVE_KEY_ALIAS=$RESOLVED_ALIAS"
+              echo "ACTIVE_STORE_PASS=$RESOLVED_STORE_PASS"
+              echo "ACTIVE_KEY_PASS=$RESOLVED_KEY_PASS"
+              echo "ACTIVE_KEYSTORE_B64<<EOF"
+              echo "$SECRET_B64"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          fi
 
       - name: Zipalign, Sign & Verify APK
         id: sign_apk
