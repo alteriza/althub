@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.althub.alteriza
 
 import android.Manifest
@@ -13,7 +15,6 @@ import android.os.SystemClock
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
-import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
