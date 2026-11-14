@@ -1,0 +1,114 @@
+END USER LICENSE AGREEMENT (EULA)
+ALTHUB APPLICATION & VCV/ICV CONTAINER FORMAT SPECIFICATION
+
+Copyright (c) 2026 Alteriza (https://github.com/alteriza). All Rights Reserved.
+
+IMPORTANT — READ CAREFULLY:
+This End User License Agreement ("Agreement" or "EULA") is a legal agreement
+between you (either an individual or a single legal entity, hereinafter "User" or
+"You") and Alteriza ("Licensor") governing:
+  (A) The ".vcv" and ".icv" container format specification and compression/seek
+      conversion logic ("Container Format Technology"); and
+  (B) The AltHub Android application, its source code, architecture, assets, and
+      compiled binaries ("Protected Application").
+
+By accessing, viewing, downloading, implementing, or using any part of this
+repository or software, You agree to be bound by all terms and conditions of
+this Agreement.
+
+================================================================================
+1. DEFINITIONS
+================================================================================
+
+1.1 "Container Format Technology" means solely the binary container layout,
+    magic-byte identifiers ("SVCV" and "SICV"), JSON metadata header schema,
+    chunked Zstandard (zstd) compression and decompression algorithms, and
+    random-access seek-table indexing logic for ".vcv" and ".icv" files.
+
+1.2 "Protected Application" means the AltHub Android application in its entirety,
+    including without limitation all Kotlin, Java, Rust JNI wrapper code, Jetpack
+    Compose user interface components, themes, local loopback HTTP streaming
+    server implementations, multi-host discovery modules, BBCode parsers, build
+    workflows, icons, graphical assets, configuration files, and compiled APK or
+    shared object ("libalthub_core.so") binaries, excluding only the abstract
+    Container Format Technology defined in Section 1.1.
+
+================================================================================
+2. PERMISSIVE GRANT FOR VCV & ICV CONTAINER FORMAT TECHNOLOGY
+================================================================================
+
+2.1 Grant of Rights. Subject to strict compliance with Section 2.2, Licensor
+    hereby grants You a worldwide, royalty-free, non-exclusive, perpetual
+    license to use, study, implement, adapt, and distribute independent software,
+    libraries, encoders, decoders, media players, or tools that read, write,
+    convert, compress, or stream the ".vcv" and ".icv" formats using the
+    Container Format Technology.
+
+2.2 Mandatory Attribution and License Inclusion. Any implementation, library,
+    software product, documentation, or derivative work that utilizes or
+    implements the Container Format Technology, in whole or in part, MUST:
+    (a) Retain and include this complete, unmodified English EULA ("LICENSE")
+        in all source distributions, binary distributions, and accompanying
+        documentation; and
+    (b) Clearly credit Alteriza (https://github.com/alteriza/althub) as the
+        original author of the ".vcv" and ".icv" Container Format Technology.
+
+================================================================================
+3. STRICT PROHIBITION ON THE PROTECTED APPLICATION (ALTHUB APK & SOURCE CODE)
+================================================================================
+
+3.1 No License Granted to Protected Application Source Code. Except for the
+    limited right to install and execute official, unmodified AltHub APK
+    releases distributed directly by Licensor for personal, non-commercial use,
+    NO LICENSE OR RIGHT IS GRANTED to the Protected Application or its source
+    code.
+
+3.2 Absolute Restrictions. You shall NOT, under any circumstances and in any
+    form whatsoever:
+    (a) Copy, reproduce, clone, publish, mirror, or redistribute the source code
+        of the Protected Application, in whole or in part;
+    (b) Modify, edit, patch, translate, adapt, or create derivative works based
+        upon the Protected Application or any component of its source code;
+    (c) Reverse engineer, decompile, disassemble, extract assets, or extract
+        compiled native libraries ("libalthub_core.so") from the AltHub APK for
+        reuse in any other application or project;
+    (d) Rebrand, repackage, re-sign, or distribute modified or unmodified builds
+        of the AltHub APK; or
+    (e) Touch, tamper with, scrape, or incorporate any portion of the Protected
+        Application's source code into any public or private codebase.
+
+================================================================================
+4. OWNERSHIP AND RESERVATION OF RIGHTS
+================================================================================
+
+4.1 All title, ownership rights, and intellectual property rights in and to the
+    Protected Application and the Container Format Technology remain exclusively
+    with Alteriza. All rights not expressly granted under Section 2 of this
+    Agreement are strictly reserved by Licensor.
+
+================================================================================
+5. TERMINATION
+================================================================================
+
+5.1 This Agreement is effective until terminated. Your rights under Section 2
+    shall terminate automatically and immediately without notice from Licensor if
+    You fail to comply with any term or condition of this Agreement, including
+    any violation of Section 2.2 or Section 3. Upon termination, You must
+    immediately cease all use and destroy all copies of the Container Format
+    Technology and Protected Application in Your possession or control.
+
+================================================================================
+6. DISCLAIMER OF WARRANTIES AND LIMITATION OF LIABILITY
+================================================================================
+
+6.1 THE CONTAINER FORMAT TECHNOLOGY AND THE PROTECTED APPLICATION ARE PROVIDED
+    "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+6.2 IN NO EVENT SHALL ALTERIZA BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, WITHOUT LIMITATION,
+    PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, LOSS OF USE, DATA, OR PROFITS,
+    OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY
+    ARISING IN ANY WAY OUT OF THE USE OF THE CONTAINER FORMAT TECHNOLOGY OR THE
+    PROTECTED APPLICATION, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
