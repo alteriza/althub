@@ -238,12 +238,6 @@ jobs:
       - name: Zipalign, Sign & Verify APK
         id: sign_apk
         run: |
-          VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle* 2>/dev/null | head -n1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')
-          if [ -z "$VERSION_NAME" ]; then
-            VERSION_NAME=$(grep -E 'versionName\s+"' app/build.gradle* 2>/dev/null | head -n1 | sed -E 's/.*versionName\s+"([^"]+)".*/\1/')
-          fi
-          VERSION_NAME="${VERSION_NAME:-1.0.0}"
-
           RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
           if [ -z "$RAW_APK" ]; then
             echo "APK release tidak ditemukan!"
@@ -251,6 +245,9 @@ jobs:
           fi
 
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
+          VERSION_NAME=$("$BUILD_TOOLS/aapt2" dump badging "$RAW_APK" 2>/dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -n1)
+          VERSION_NAME=$(printf '%s' "${VERSION_NAME:-1.0.${GITHUB_RUN_NUMBER}}" | tr -cd '0-9A-Za-z._-')
           SIGNED_APK="AltHub-v${VERSION_NAME}-b${GITHUB_RUN_NUMBER}.apk"
 
           "$BUILD_TOOLS/zipalign" -f -p 4 "$RAW_APK" aligned.apk
@@ -264,8 +261,8 @@ jobs:
 
           "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED_APK"
 
-          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "signed_apk=$SIGNED_APK" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
 
       - name: Write Signing Key to Job Summary
         if: always()
@@ -275,7 +272,7 @@ jobs:
             echo "## 🔐 AltHub APK Signing Key Info"
             echo ""
             echo "- **Sumber Key:** \`$KEY_SOURCE\`"
-            echo "- **APK Output:** \`${{ steps.sign_apk.outputs.signed_apk }}\`"
+            echo "- **APK Output:** \`$SIGNED_APK\`"
             echo ""
             echo "### Detail Secret Variables"
             echo "| Secret Name | Value |"
@@ -302,11 +299,15 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ]; then
             RELEASE_TAG="${{ github.ref_name }}"
           else
-            RELEASE_TAG="v${{ steps.sign_apk.outputs.version_name }}-b${GITHUB_RUN_NUMBER}"
+            RELEASE_TAG="v${VERSION_NAME}-b${GITHUB_RUN_NUMBER}"
           fi
 
-          gh release create "$RELEASE_TAG" \
-            "${{ steps.sign_apk.outputs.signed_apk }}" \
-            --title "AltHub v${{ steps.sign_apk.outputs.version_name }} (Build #${GITHUB_RUN_NUMBER})" \
-            --notes "Build otomatis dari commit \`${GITHUB_SHA::7}\` (ARMv7 & ARMv8)." \
-            --latest
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$SIGNED_APK" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              "$SIGNED_APK" \
+              --title "AltHub v${VERSION_NAME} (Build #${GITHUB_RUN_NUMBER})" \
+              --notes "Build otomatis dari commit \`${GITHUB_SHA::7}\` (ARMv7 & ARMv8)." \
+              --latest
+          fi
