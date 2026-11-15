@@ -1,10 +1,5 @@
 package com.althub.alteriza
 
-enum class MediaKind {
-    VIDEO,
-    IMAGE
-}
-
 enum class SourceType {
     GITHUB,
     GDRIVE,
@@ -16,10 +11,15 @@ enum class SourceType {
     DIRECT
 }
 
-enum class DownloadFormatPref {
-    ASK,
-    CONTAINER,
-    ORIGINAL
+enum class MediaKind {
+    VIDEO,
+    IMAGE
+}
+
+enum class DownloadFormatPref(val label: String) {
+    ASK("ASK EVERY TIME"),
+    ORIGINAL("ORIGINAL FORMAT"),
+    CONTAINER("CONTAINER (.VCV / .ICV)")
 }
 
 data class RemoteMediaItem(
@@ -29,12 +29,40 @@ data class RemoteMediaItem(
     val kind: MediaKind,
     val sourceType: SourceType,
     val mediaUrl: String,
-    val thumbnailUrl: String? = null,
+    val thumbnailUrl: String?,
+    val sizeBytes: Long = 0L,
+    val folderPath: String = "/web",
     val isContainer: Boolean = false,
-    val sizeBytes: Long? = null,
     val headers: Map<String, String> = emptyMap(),
-    val tags: List<String> = emptyList()
+    val localPath: String? = null,
+    val videoTags: String? = null
 )
+
+data class ContainerHeaderInfo(
+    val isContainer: Boolean,
+    val headerOffset: Long,
+    val compression: Int,
+    val originalExt: String,
+    val originalSize: Long,
+    val chunkSize: Int = 0
+)
+
+data class InfoPost(
+    val id: String,
+    val title: String,
+    val fileName: String,
+    val bbcodeContent: String,
+    val sourceUrl: String
+)
+
+data class DiscoveryResult(
+    val mediaItems: List<RemoteMediaItem>,
+    val infoPosts: List<InfoPost>,
+    val activeSources: List<String>,
+    val errorMessage: String? = null
+)
+
+typealias CdnDiscoveryResult = DiscoveryResult
 
 data class HistoryRecord(
     val id: String,
@@ -43,8 +71,8 @@ data class HistoryRecord(
     val kind: MediaKind,
     val sourceType: SourceType,
     val mediaUrl: String,
-    val thumbnailUrl: String? = null,
-    val isContainer: Boolean = false,
+    val thumbnailUrl: String?,
+    val isContainer: Boolean,
     val timestampMs: Long
 )
 
@@ -55,8 +83,7 @@ data class DownloadedFileEntry(
     val isVideo: Boolean
 )
 
-data class CdnDiscoveryResult(
-    val items: List<RemoteMediaItem>,
-    val announcements: List<String>,
-    val activeSources: Int
+data class CaptchaChallenge(
+    val challengeId: String,
+    val code: String
 )

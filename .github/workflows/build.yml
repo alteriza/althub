@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   # =========================================================================
-  # JOB 1 (PARALEL): Generate seluruh mipmap DPI & logo dari icon.png
+  # STAGE 1A (PARALEL): Generate Mipmap (Legacy + Adaptive) & Logo dari icon.png
   # =========================================================================
   generate-icons:
     name: Generate Mipmap Icons
@@ -17,9 +17,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Generate Mipmap DPI from icon.png
+      - name: Generate Mipmap & Adaptive Icons from icon.png
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil
+          python3 -m pip install --quiet --user Pillow
           python3 - << 'EOF'
           import os
           from PIL import Image, ImageDraw
@@ -28,10 +28,15 @@ jobs:
               raise FileNotFoundError("icon.png tidak ditemukan di root repository!")
 
           src = Image.open("icon.png").convert("RGBA")
-          os.makedirs("app/src/main/res/drawable", exist_ok=True)
-          src.save("app/src/main/res/drawable/ic_althub_logo.png")
 
-          densities = {
+          # 1. Logo internal aplikasi (drawable/ic_althub_logo.png)
+          os.makedirs("app/src/main/res/drawable", exist_ok=True)
+          logo = src.copy()
+          logo.thumbnail((512, 512), Image.Resampling.LANCZOS)
+          logo.save("app/src/main/res/drawable/ic_althub_logo.png")
+
+          # 2. Legacy & Round Mipmap (Android 7 ke bawah & fallback)
+          legacy_densities = {
               "mipmap-mdpi": 48,
               "mipmap-hdpi": 72,
               "mipmap-xhdpi": 96,
@@ -39,9 +44,19 @@ jobs:
               "mipmap-xxxhdpi": 192,
           }
 
-          for folder, size in densities.items():
+          # 3. Adaptive Icon Foreground (108dp canvas dengan safe-zone 68%)
+          adaptive_densities = {
+              "mipmap-mdpi": 108,
+              "mipmap-hdpi": 162,
+              "mipmap-xhdpi": 216,
+              "mipmap-xxhdpi": 324,
+              "mipmap-xxxhdpi": 432,
+          }
+
+          for folder, size in legacy_densities.items():
               out_dir = f"app/src/main/res/{folder}"
               os.makedirs(out_dir, exist_ok=True)
+
               resized = src.resize((size, size), Image.Resampling.LANCZOS)
               resized.save(f"{out_dir}/ic_launcher.png")
 
@@ -51,18 +66,49 @@ jobs:
               round_img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
               round_img.paste(resized, (0, 0), mask=mask)
               round_img.save(f"{out_dir}/ic_launcher_round.png")
+
+              fg_size = adaptive_densities[folder]
+              safe_size = int(fg_size * 0.68)
+              fg_canvas = Image.new("RGBA", (fg_size, fg_size), (0, 0, 0, 0))
+              fg_icon = src.resize((safe_size, safe_size), Image.Resampling.LANCZOS)
+              offset = (fg_size - safe_size) // 2
+              fg_canvas.paste(fg_icon, (offset, offset), mask=fg_icon)
+              fg_canvas.save(f"{out_dir}/ic_launcher_foreground.png")
+
+          # 4. Adaptive Icon XML (Android 8.0+ / API 26+)
+          anydpi_dir = "app/src/main/res/mipmap-anydpi-v26"
+          os.makedirs(anydpi_dir, exist_ok=True)
+
+          bg_xml = """<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#0D0D0D" />
+          </shape>
+          """
+          with open("app/src/main/res/drawable/ic_launcher_background.xml", "w") as f:
+              f.write(bg_xml.strip() + "\n")
+
+          adaptive_xml = """<?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background" />
+              <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+          </adaptive-icon>
+          """
+          for xml_name in ("ic_launcher.xml", "ic_launcher_round.xml"):
+              with open(f"{anydpi_dir}/{xml_name}", "w") as f:
+                  f.write(adaptive_xml.strip() + "\n")
           EOF
 
-      - name: Pass Generated Icons to Next Job
+      - name: Cache Generated Icons for Next Job
         uses: actions/cache/save@v4
         with:
           path: |
             app/src/main/res/drawable/ic_althub_logo.png
+            app/src/main/res/drawable/ic_launcher_background.xml
             app/src/main/res/mipmap-*
           key: althub-icons-${{ github.run_id }}-${{ github.run_attempt }}
 
   # =========================================================================
-  # JOB 2 (PARALEL MATRIX): Compile Rust libalthub_core.so (ARMv7 & ARMv8)
+  # STAGE 1B (PARALEL MATRIX): Compile Rust Native Core (ARMv7 & ARMv8)
   # =========================================================================
   build-rust:
     name: Build Rust (${{ matrix.abi }})
@@ -80,58 +126,77 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Android NDK
-        uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: latest
-          packages: ndk;27.2.12479018
+      - name: Detect Rust Directory & Crate Name
+        id: rust_meta
+        run: |
+          if [ -f "rust/Cargo.toml" ]; then
+            CARGO_DIR="rust"
+          elif [ -f "app/src/main/rust/Cargo.toml" ]; then
+            CARGO_DIR="app/src/main/rust"
+          else
+            CARGO_DIR="."
+          fi
+          CRATE_NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CARGO_DIR/Cargo.toml" | head -n1 | tr '-' '_')
+          SO_NAME="lib${CRATE_NAME:-althub_core}.so"
+          echo "cargo_dir=$CARGO_DIR" >> "$GITHUB_OUTPUT"
+          echo "so_name=$SO_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Android NDK Available
+        run: |
+          NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            NDK_DIR=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk" -maxdepth 1 -mindepth 1 2>/dev/null | sort -V | tail -n1 || true)
+          fi
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            yes | "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" >/dev/null
+            NDK_DIR="${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/27.2.12479018"
+          fi
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
 
       - name: Setup Rust (${{ matrix.rust_target }})
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
-      - name: Cache Cargo & cargo-ndk
+      - name: Install Prebuilt cargo-ndk
+        uses: taiki-e/install-action@cargo-ndk
+
+      - name: Cache Cargo Dependencies & Target
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            rust/target/
-          key: cargo-${{ matrix.abi }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock') }}
+            ${{ steps.rust_meta.outputs.cargo_dir }}/target/
+          key: cargo-${{ matrix.abi }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.abi }}-
 
-      - name: Install cargo-ndk if Missing
+      - name: Compile ${{ steps.rust_meta.outputs.so_name }} (${{ matrix.abi }})
+        working-directory: ${{ steps.rust_meta.outputs.cargo_dir }}
         run: |
-          if ! command -v cargo-ndk &> /dev/null; then
-            cargo install cargo-ndk
-          fi
-
-      - name: Compile libalthub_core.so (${{ matrix.abi }})
-        working-directory: rust
-        run: |
+          OUT_JNI="$GITHUB_WORKSPACE/app/src/main/jniLibs"
+          mkdir -p "$OUT_JNI"
           cargo ndk \
             -t ${{ matrix.abi }} \
             --platform 26 \
-            -o ../app/src/main/jniLibs \
+            -o "$OUT_JNI" \
             build --release
 
-      - name: Pass Compiled .so to Next Job
+      - name: Cache Compiled .so for Next Job
         uses: actions/cache/save@v4
         with:
-          path: app/src/main/jniLibs/${{ matrix.abi }}/libalthub_core.so
+          path: app/src/main/jniLibs/${{ matrix.abi }}/*.so
           key: althub-jni-${{ matrix.abi }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # =========================================================================
-  # JOB 3 (SEQUENCE AKHIR): Assemble APK, Sign & Langsung Upload ke Release
+  # STAGE 2 (SEQUENCE AKHIR): Assemble APK, Sign & Upload ke GitHub Release
   # =========================================================================
   build-sign-release:
     name: Build, Sign & Publish Release
     runs-on: ubuntu-latest
-    needs: [ generate-icons, build-rust ]
+    needs: [generate-icons, build-rust]
 
     steps:
       - name: Checkout Repository
@@ -142,20 +207,24 @@ jobs:
         with:
           path: |
             app/src/main/res/drawable/ic_althub_logo.png
+            app/src/main/res/drawable/ic_launcher_background.xml
             app/src/main/res/mipmap-*
           key: althub-icons-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
 
       - name: Restore Compiled Rust ARM64
         uses: actions/cache/restore@v4
         with:
-          path: app/src/main/jniLibs/arm64-v8a/libalthub_core.so
+          path: app/src/main/jniLibs/arm64-v8a/*.so
           key: althub-jni-arm64-v8a-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
 
       - name: Restore Compiled Rust ARMv7
         uses: actions/cache/restore@v4
         with:
-          path: app/src/main/jniLibs/armeabi-v7a/libalthub_core.so
+          path: app/src/main/jniLibs/armeabi-v7a/*.so
           key: althub-jni-armeabi-v7a-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -163,27 +232,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: latest
-          packages: platform-tools platforms;android-35 build-tools;35.0.0
-
-      - name: Setup Gradle
+      - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.11.1
 
       - name: Build Release APK
         run: |
-          if [ -f "app/src/main/jniLibs/arm64-v8a/libalthub_core.so" ] && [ -f "app/src/main/jniLibs/armeabi-v7a/libalthub_core.so" ]; then
-            gradle assembleRelease -x cargoBuild || gradle assembleRelease
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
           else
-            gradle assembleRelease
+            GRADLE_CMD="gradle"
+          fi
+
+          if $GRADLE_CMD tasks --all --quiet 2>/dev/null | grep -q "cargoBuild"; then
+            $GRADLE_CMD assembleRelease -x cargoBuild --no-daemon
+          else
+            $GRADLE_CMD assembleRelease --no-daemon
           fi
 
       # ---------------------------------------------------------------------
-      # SIGNING KEY: Auto-generate jika secret kosong, atau pakai dari Secrets
+      # SIGNING KEY: Pakai GitHub Secrets jika ada, atau auto-generate baru
       # ---------------------------------------------------------------------
       - name: Prepare Signing Keystore
         env:
@@ -207,7 +275,7 @@ jobs:
 
             KEY_B64=$(base64 -w 0 release-keystore.jks)
             {
-              echo "KEY_SOURCE=AUTO-GENERATED (Simpan ke Secrets agar update APK berikutnya kompatibel)"
+              echo "KEY_MODE=AUTO"
               echo "ACTIVE_KEY_ALIAS=$GEN_ALIAS"
               echo "ACTIVE_STORE_PASS=$GEN_PASS"
               echo "ACTIVE_KEY_PASS=$GEN_PASS"
@@ -216,32 +284,37 @@ jobs:
               echo "EOF"
             } >> "$GITHUB_ENV"
           else
+            if [ -z "$SECRET_STORE_PASS" ]; then
+              echo "ERROR: SIGNING_KEYSTORE_BASE64 diisi, tetapi SIGNING_STORE_PASSWORD kosong!"
+              exit 1
+            fi
             printf '%s' "$SECRET_B64" | tr -d '\r\n ' | base64 -d > release-keystore.jks
             RESOLVED_ALIAS="${SECRET_ALIAS:-althub}"
-            RESOLVED_STORE_PASS="${SECRET_STORE_PASS}"
+            RESOLVED_STORE_PASS="$SECRET_STORE_PASS"
             RESOLVED_KEY_PASS="${SECRET_KEY_PASS:-$RESOLVED_STORE_PASS}"
 
             {
-              echo "KEY_SOURCE=GITHUB SECRETS"
+              echo "KEY_MODE=SECRET"
               echo "ACTIVE_KEY_ALIAS=$RESOLVED_ALIAS"
               echo "ACTIVE_STORE_PASS=$RESOLVED_STORE_PASS"
               echo "ACTIVE_KEY_PASS=$RESOLVED_KEY_PASS"
-              echo "ACTIVE_KEYSTORE_B64<<EOF"
-              echo "$SECRET_B64"
-              echo "EOF"
             } >> "$GITHUB_ENV"
           fi
 
       - name: Zipalign, Sign & Verify APK
-        id: sign_apk
         run: |
           RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
           if [ -z "$RAW_APK" ]; then
-            echo "APK release tidak ditemukan!"
+            echo "ERROR: APK release tidak ditemukan!"
             exit 1
           fi
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          BUILD_TOOLS=$(find "$SDK_ROOT/build-tools" -maxdepth 1 -mindepth 1 | sort -V | tail -n1)
+          if [ -z "$BUILD_TOOLS" ]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0" >/dev/null
+            BUILD_TOOLS="$SDK_ROOT/build-tools/35.0.0"
+          fi
 
           VERSION_NAME=$("$BUILD_TOOLS/aapt2" dump badging "$RAW_APK" 2>/dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -n1)
           VERSION_NAME=$(printf '%s' "${VERSION_NAME:-1.0.${GITHUB_RUN_NUMBER}}" | tr -cd '0-9A-Za-z._-')
@@ -257,39 +330,47 @@ jobs:
             aligned.apk
 
           "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED_APK"
+          APK_SHA256=$(sha256sum "$SIGNED_APK" | awk '{print $1}')
 
-          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
+          {
+            echo "VERSION_NAME=$VERSION_NAME"
+            echo "SIGNED_APK=$SIGNED_APK"
+            echo "APK_SHA256=$APK_SHA256"
+          } >> "$GITHUB_ENV"
 
-      - name: Write Signing Key to Job Summary
-        if: always()
+      - name: Write Signing Info to Job Summary
+        if: always() && env.SIGNED_APK != ''
         run: |
           CERT_INFO=$(keytool -list -v -keystore release-keystore.jks -alias "$ACTIVE_KEY_ALIAS" -storepass "$ACTIVE_STORE_PASS" 2>/dev/null | grep -E "SHA1:|SHA256:|Valid from:" || true)
           {
-            echo "## 🔐 AltHub APK Signing Key Info"
+            echo "## 🔐 AltHub APK Build & Signing Summary"
             echo ""
-            echo "- **Sumber Key:** \`$KEY_SOURCE\`"
             echo "- **APK Output:** \`$SIGNED_APK\`"
+            echo "- **APK SHA-256:** \`$APK_SHA256\`"
+            echo "- **Sumber Keystore:** \`$KEY_MODE\`"
             echo ""
-            echo "### Detail Secret Variables"
-            echo "| Secret Name | Value |"
-            echo "| :--- | :--- |"
-            echo "| \`SIGNING_KEY_ALIAS\` | \`$ACTIVE_KEY_ALIAS\` |"
-            echo "| \`SIGNING_STORE_PASSWORD\` | \`$ACTIVE_STORE_PASS\` |"
-            echo "| \`SIGNING_KEY_PASSWORD\` | \`$ACTIVE_KEY_PASS\` |"
-            echo ""
-            echo "### \`SIGNING_KEYSTORE_BASE64\`"
-            echo '```text'
-            echo "$ACTIVE_KEYSTORE_B64"
-            echo '```'
-            echo ""
+            if [ "$KEY_MODE" = "AUTO" ]; then
+              echo "> ⚠️ **Penting:** Keystore baru dibuat otomatis. Simpan nilai di bawah ke **Repository Secrets** agar update APK berikutnya kompatibel tanpa uninstall."
+              echo ""
+              echo "| Secret Name | Value |"
+              echo "| :--- | :--- |"
+              echo "| \`SIGNING_KEY_ALIAS\` | \`$ACTIVE_KEY_ALIAS\` |"
+              echo "| \`SIGNING_STORE_PASSWORD\` | \`$ACTIVE_STORE_PASS\` |"
+              echo "| \`SIGNING_KEY_PASSWORD\` | \`$ACTIVE_KEY_PASS\` |"
+              echo ""
+              echo "### \`SIGNING_KEYSTORE_BASE64\`"
+              echo '```text'
+              echo "$ACTIVE_KEYSTORE_B64"
+              echo '```'
+              echo ""
+            fi
             echo "### Certificate Fingerprint"
             echo '```text'
             echo "$CERT_INFO"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Signed APK Directly to GitHub Release
+      - name: Publish Signed APK Directly to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -305,6 +386,6 @@ jobs:
             gh release create "$RELEASE_TAG" \
               "$SIGNED_APK" \
               --title "AltHub v${VERSION_NAME} (Build #${GITHUB_RUN_NUMBER})" \
-              --notes "Build otomatis dari commit \`${GITHUB_SHA::7}\` (ARMv7 & ARMv8)." \
+              --notes "$(printf 'Build otomatis dari commit `%s` (ARMv7 & ARMv8).\n\n- **File:** `%s`\n- **SHA-256:** `%s`' "${GITHUB_SHA::7}" "$SIGNED_APK" "$APK_SHA256")" \
               --latest
           fi

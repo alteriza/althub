@@ -1,4 +1,4 @@
-use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::objects::{JByteArray, JObject, JString};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use serde::{Deserialize, Serialize};
@@ -115,8 +115,11 @@ struct SeekTableResponse {
 #[derive(Serialize)]
 struct HostResolution {
     host_type: String,
+    host: String,
     resolved_url: String,
+    url: String,
     file_id: String,
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -310,6 +313,32 @@ fn extract_segment_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
     }
 }
 
+fn extract_youtube_video_id(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    let raw_id = if let Some(idx) = lower.find("youtu.be/") {
+        &url[idx + 9..]
+    } else if let Some(idx) = lower.find("/shorts/") {
+        &url[idx + 8..]
+    } else if let Some(idx) = lower.find("/embed/") {
+        &url[idx + 7..]
+    } else if let Some(idx) = lower.find("/live/") {
+        &url[idx + 6..]
+    } else if let Some(idx) = lower.find("v=") {
+        &url[idx + 2..]
+    } else {
+        return None;
+    };
+    let clean_id: String = raw_id
+        .chars()
+        .take_while(|&c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        .collect();
+    if clean_id.len() >= 6 {
+        Some(clean_id)
+    } else {
+        None
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_althub_alteriza_NativeCore_getPrimaryCdnUrl(
     env: JNIEnv,
@@ -395,10 +424,7 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_getCornDisclaimerMess
     env: JNIEnv,
     _this: JObject,
 ) -> jstring {
-    let msg = obf_str!(
-        "WARNING! ADULT ONLY.",
-        0x51
-    );
+    let msg = obf_str!("WARNING! ADULT ONLY.", 0x51);
     env.new_string(msg).unwrap_or_default().into_raw()
 }
 
@@ -457,120 +483,96 @@ pub extern "system" fn Java_com_althub_alteriza_NativeCore_verifyCornCaptcha(
     }
 }
 
-fn extract_youtube_video_id(url: &str) -> Option<String> {
-    let lower = url.to_ascii_lowercase();
-    let raw_id = if let Some(idx) = lower.find("youtu.be/") {
-        &url[idx + 9..]
-    } else if let Some(idx) = lower.find("/shorts/") {
-        &url[idx + 8..]
-    } else if let Some(idx) = lower.find("/embed/") {
-        &url[idx + 7..]
-    } else if let Some(idx) = lower.find("/live/") {
-        &url[idx + 6..]
-    } else if let Some(idx) = lower.find("v=") {
-        &url[idx + 2..]
-    } else {
-        return None;
-    };
-
-    let clean_id: String = raw_id
-        .chars()
-        .take_while(|&c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        .collect();
-
-    if clean_id.len() >= 6 {
-        Some(clean_id)
-    } else {
-        None
-    }
-}
-
 #[no_mangle]
-pub extern "system" fn Java_com_althub_alteriza_NativeCore_resolveHostEndpoint<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    raw_url: JString<'local>,
+pub extern "system" fn Java_com_althub_alteriza_NativeCore_resolveHostEndpoint(
+    mut env: JNIEnv,
+    _this: JObject,
+    raw_url: JString,
 ) -> jstring {
-    let url: String = match env.get_string(&raw_url) {
-        Ok(s) => s.into(),
-        Err(_) => return std::ptr::null_mut(),
-    };
+    let input: String = env.get_string(&raw_url).map(Into::into).unwrap_or_default();
+    let trimmed = input.trim().to_string();
+    let lower = trimmed.to_lowercase();
 
-    let trimmed = url.trim();
-    let lower = trimmed.to_ascii_lowercase();
+    let yt_host = obf_str!("youtube.com", 0x11);
+    let ytu_host = obf_str!("youtu.be", 0x12);
+    let pd_host = obf_str!("pixeldrain.com", 0x19);
+    let gf_host = obf_str!("gofile.io", 0x22);
+    let af_host = obf_str!("acefile.co", 0x31);
+    let fd_host = obf_str!("filedom", 0x44);
+    let gd_host = obf_str!("drive.google.com", 0x51);
+    let docs_host = obf_str!("docs.google.com", 0x52);
+    let gh_host = obf_str!("github.com", 0x63);
+    let gh_raw = obf_str!("raw.githubusercontent.com", 0x64);
 
-    let (host, id, resolved_url) = if lower.contains("youtube.com") || lower.contains("youtu.be") {
-        let vid = extract_youtube_video_id(trimmed).unwrap_or_default();
+    let (host_type, resolved_url, file_id) = if lower.contains(&yt_host) || lower.contains(&ytu_host) {
+        let vid = extract_youtube_video_id(&trimmed).unwrap_or_default();
         let canonical = if vid.is_empty() {
-            trimmed.to_string()
+            trimmed
         } else {
             format!("https://www.youtube.com/watch?v={}", vid)
         };
-        ("youtube", vid, canonical)
-    } else if lower.contains("pixeldrain.com") {
-        let id = trimmed
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .split('?')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        let api_url = if id.is_empty() {
-            trimmed.to_string()
+        ("youtube".to_string(), canonical, vid)
+    } else if lower.contains(&pd_host) {
+        if let Some(id) = extract_segment_after(&trimmed, "/u/")
+            .or_else(|| extract_segment_after(&trimmed, "/api/file/"))
+        {
+            let api_base = obf_str!("https://pixeldrain.com/api/file/", 0x1A);
+            (
+                "pixeldrain".to_string(),
+                format!("{}{}", api_base, id),
+                id.to_string(),
+            )
+        } else if let Some(lid) = extract_segment_after(&trimmed, "/l/") {
+            let api_list = obf_str!("https://pixeldrain.com/api/list/", 0x1B);
+            (
+                "pixeldrain_list".to_string(),
+                format!("{}{}", api_list, lid),
+                lid.to_string(),
+            )
         } else {
-            format!("https://pixeldrain.com/api/file/{}?download", id)
+            ("direct".to_string(), trimmed, String::new())
+        }
+    } else if lower.contains(&gf_host) {
+        let id = extract_segment_after(&trimmed, "/d/").unwrap_or("").to_string();
+        let api_base = obf_str!("https://api.gofile.io/contents/", 0x23);
+        let wt = obf_str!("?wt=4fd6sg89d7s6", 0x24);
+        let resolved = if id.is_empty() {
+            trimmed
+        } else {
+            format!("{}{}{}", api_base, id, wt)
         };
-        ("pixeldrain", id, api_url)
-    } else if lower.contains("gofile.io") {
-        let id = trimmed
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .split('?')
-            .next()
+        ("gofile".to_string(), resolved, id)
+    } else if lower.contains(&af_host) {
+        let id = extract_segment_after(&trimmed, "/f/")
+            .or_else(|| extract_segment_after(&trimmed, "/player/"))
             .unwrap_or("")
             .to_string();
-        ("gofile", id, trimmed.to_string())
-    } else if lower.contains("acefile.co") {
-        let id = trimmed
-            .split('/')
-            .find(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
-            .unwrap_or("")
-            .to_string();
-        ("acefile", id, trimmed.to_string())
-    } else if lower.contains("filedom.") {
-        let id = trimmed
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .split('?')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        ("filedom", id, trimmed.to_string())
-    } else if lower.contains("drive.google.com") || lower.contains("docs.google.com") {
-        ("gdrive", String::new(), trimmed.to_string())
-    } else if lower.contains("github.com") || lower.contains("raw.githubusercontent.com") {
-        ("github", String::new(), trimmed.to_string())
+        ("acefile".to_string(), trimmed, id)
+    } else if lower.contains(&fd_host) {
+        ("filedom".to_string(), trimmed, String::new())
+    } else if lower.contains(&gd_host) || lower.contains(&docs_host) {
+        if lower.contains("/folders/") {
+            ("gdrive_folder".to_string(), trimmed, String::new())
+        } else {
+            ("gdrive_file".to_string(), trimmed, String::new())
+        }
+    } else if lower.contains(&gh_host) || lower.contains(&gh_raw) {
+        ("github".to_string(), trimmed, String::new())
     } else {
-        ("direct", String::new(), trimmed.to_string())
+        ("direct".to_string(), trimmed, String::new())
     };
 
-    let json = serde_json::json!({
-        "host": host,
-        "id": id,
-        "url": resolved_url
-    })
-    .to_string();
+    let res = HostResolution {
+        host_type: host_type.clone(),
+        host: host_type,
+        resolved_url: resolved_url.clone(),
+        url: resolved_url,
+        file_id: file_id.clone(),
+        id: file_id,
+    };
 
-    match env.new_string(json) {
-        Ok(out) => out.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    let json = serde_json::to_string(&res).unwrap_or_default();
+    env.new_string(json).unwrap_or_default().into_raw()
 }
 
 #[no_mangle]
