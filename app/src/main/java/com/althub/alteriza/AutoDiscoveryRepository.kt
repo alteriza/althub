@@ -49,6 +49,11 @@ object AutoDiscoveryRepository {
         val subPath: String
     )
 
+    private data class CdnSourceEntry(
+        val url: String,
+        val customFileName: String? = null
+    )
+
     fun getCachedThumbnail(itemId: String): Bitmap? = memoryThumbs[itemId]
 
     fun clearMemoryCache() {
@@ -225,6 +230,38 @@ object AutoDiscoveryRepository {
         return null
     }
 
+    private fun parseCdnLine(line: String): CdnSourceEntry? {
+        val trimmed = line.trim()
+        if (!trimmed.startsWith("http://", ignoreCase = true) &&
+            !trimmed.startsWith("https://", ignoreCase = true)
+        ) {
+            return null
+        }
+
+        if (trimmed.contains('|')) {
+            val rawUrl = trimmed.substringBefore('|').trim()
+            val alias = trimmed.substringAfter('|').trim().ifBlank { null }
+            return CdnSourceEntry(rawUrl.substringBefore('#').trim(), alias)
+        }
+
+        if (trimmed.contains('#')) {
+            val rawUrl = trimmed.substringBefore('#').trim()
+            val frag = decodeUrlName(trimmed.substringAfter('#').trim()).ifBlank { null }
+            val hasTagOrExt = frag != null && (frag.contains('[') || classifyMediaByName(frag) != null)
+            return CdnSourceEntry(rawUrl, if (hasTagOrExt) frag else null)
+        }
+
+        return CdnSourceEntry(trimmed, null)
+    }
+
+    private fun applyCustomFileName(customName: String?, fallbackName: String): String {
+        val clean = customName?.trim()?.takeIf { it.isNotEmpty() } ?: return fallbackName
+        if (!clean.contains('.') && fallbackName.contains('.')) {
+            return "$clean.${fallbackName.substringAfterLast('.')}"
+        }
+        return clean
+    }
+
     suspend fun discoverAll(): DiscoveryResult =
         discoverFromCdn(
             cdnUrl = NativeCore.getPrimaryCdnUrl(),
@@ -257,7 +294,7 @@ object AutoDiscoveryRepository {
             ?.filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
             .orEmpty()
 
-        val parsedUrls = mutableListOf<String>()
+        val parsedEntries = mutableListOf<CdnSourceEntry>()
         val bbBuffer = StringBuilder()
         var insideBbBlock = false
         var announcementIdx = 0
@@ -283,9 +320,8 @@ object AutoDiscoveryRepository {
                     if (bbBuffer.isNotEmpty()) bbBuffer.append('\n')
                     bbBuffer.append(line)
                 }
-                line.startsWith("http://", ignoreCase = true) ||
-                    line.startsWith("https://", ignoreCase = true) -> {
-                    parsedUrls.add(line)
+                else -> {
+                    parseCdnLine(line)?.let { parsedEntries.add(it) }
                 }
             }
         }
@@ -295,16 +331,16 @@ object AutoDiscoveryRepository {
             postMap[key] = buildInfoPost(key, "Announcement #$announcementIdx", bbBuffer.toString().trim(), cdnUrl)
         }
 
-        val sourceUrls = when {
-            parsedUrls.isNotEmpty() -> parsedUrls.distinct()
-            fallbackRepoUrl != null -> listOf(fallbackRepoUrl)
+        val sourceEntries = when {
+            parsedEntries.isNotEmpty() -> parsedEntries.distinctBy { "${it.url}|${it.customFileName.orEmpty()}" }
+            fallbackRepoUrl != null -> listOf(CdnSourceEntry(fallbackRepoUrl))
             else -> emptyList()
         }
 
-        // PASS 1: Crawl semua sumber secara paralel & kumpulkan aset .thumbnail/ ke Global Thumbnail Pool
         coroutineScope {
-            sourceUrls.map { src ->
+            sourceEntries.map { entry ->
                 async {
+                    val src = entry.url
                     activeSources.add(src)
                     val hostJson = runCatching { NativeCore.resolveHostEndpoint(src) }.getOrNull()
                     val hostObj = hostJson?.let { runCatching { JSONObject(it) }.getOrNull() }
@@ -331,7 +367,7 @@ object AutoDiscoveryRepository {
                     when (hostType) {
                         "youtube" -> {
                             runCatching {
-                                discoverYouTubeVideo(src, mediaMap)
+                                discoverYouTubeVideo(src, mediaMap, entry.customFileName)
                             }.onFailure {
                                 errors.add("YouTube: ${it.message}")
                             }
@@ -350,7 +386,7 @@ object AutoDiscoveryRepository {
                             val fid = extractDriveId(src)
                             if (fid != null) {
                                 runCatching {
-                                    discoverSingleDriveFile(fid, mediaMap)
+                                    discoverSingleDriveFile(fid, mediaMap, entry.customFileName)
                                 }.onFailure {
                                     errors.add("DriveFile ($fid): ${it.message}")
                                 }
@@ -366,7 +402,9 @@ object AutoDiscoveryRepository {
                                 }
                             } else {
                                 runCatching {
-                                    discoverDirectOrWebFile(src, SourceType.GITHUB, mediaMap)
+                                    discoverDirectOrWebFile(src, SourceType.GITHUB, mediaMap, entry.customFileName)
+                                }.onFailure {
+                                    errors.add("GitHubRelease: ${it.message}")
                                 }
                             }
                         }
@@ -376,7 +414,7 @@ object AutoDiscoveryRepository {
                             }
                             val streamUrl = if (pid.isNotEmpty()) "https://pixeldrain.com/api/file/$pid" else resolvedUrl.substringBefore('?')
                             runCatching {
-                                discoverPixeldrainFile(pid, streamUrl, mediaMap)
+                                discoverPixeldrainFile(pid, streamUrl, mediaMap, entry.customFileName)
                             }.onFailure {
                                 errors.add("Pixeldrain ($pid): ${it.message}")
                             }
@@ -409,21 +447,21 @@ object AutoDiscoveryRepository {
                         }
                         "acefile" -> {
                             runCatching {
-                                discoverAcefilePage(src, fileId, mediaMap)
+                                discoverAcefilePage(src, fileId, mediaMap, entry.customFileName)
                             }.onFailure {
                                 errors.add("Acefile ($fileId): ${it.message}")
                             }
                         }
                         "filedom" -> {
                             runCatching {
-                                discoverDirectOrWebFile(src, SourceType.FILEDOM, mediaMap)
+                                discoverDirectOrWebFile(src, SourceType.FILEDOM, mediaMap, entry.customFileName)
                             }.onFailure {
                                 errors.add("Filedom: ${it.message}")
                             }
                         }
                         else -> {
                             runCatching {
-                                discoverDirectOrWebFile(src, SourceType.DIRECT, mediaMap)
+                                discoverDirectOrWebFile(src, SourceType.DIRECT, mediaMap, entry.customFileName)
                             }.onFailure {
                                 errors.add("Direct: ${it.message}")
                             }
@@ -444,7 +482,6 @@ object AutoDiscoveryRepository {
             }
         }
 
-        // PASS 2: Hybrid Thumbnail Matching dari Global Thumbnail Pool untuk semua media
         val finalMediaItems = mediaMap.values.map { item ->
             val poolThumb = resolveMultiUseThumbnail(item.fileName, globalThumbPool, item.title)
             if (poolThumb != null) {
@@ -468,7 +505,8 @@ object AutoDiscoveryRepository {
 
     private fun discoverYouTubeVideo(
         rawUrl: String,
-        mediaMap: MutableMap<String, RemoteMediaItem>
+        mediaMap: MutableMap<String, RemoteMediaItem>,
+        customFileName: String? = null
     ) {
         val videoId = LocalStreamServer.resolveYouTubeVideoId(rawUrl) ?: return
         val canonicalUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -479,12 +517,17 @@ object AutoDiscoveryRepository {
         } else {
             null
         } ?: "YouTube_$videoId"
-        val safeFileName = "${rawTitle.replace(Regex("""[\\/:*?"<>|]"""), "_").trim()}.mp4"
+        val defaultFileName = "${rawTitle.replace(Regex("""[\\/:*?"<>|]"""), "_").trim()}.mp4"
+        val finalFileName = applyCustomFileName(customFileName, defaultFileName)
         val defaultThumb = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-        val itemKey = "yt_$videoId"
+        val itemKey = if (customFileName.isNullOrBlank()) {
+            "yt_$videoId"
+        } else {
+            "yt_${videoId}_${sha256(customFileName).take(8)}"
+        }
         mediaMap[itemKey] = buildMediaItem(
             id = itemKey,
-            fileName = safeFileName,
+            fileName = finalFileName,
             kind = MediaKind.VIDEO,
             sourceType = SourceType.YOUTUBE,
             mediaUrl = canonicalUrl,
@@ -541,20 +584,22 @@ object AutoDiscoveryRepository {
     private fun discoverPixeldrainFile(
         fileId: String,
         streamUrl: String,
-        mediaMap: MutableMap<String, RemoteMediaItem>
+        mediaMap: MutableMap<String, RemoteMediaItem>,
+        customFileName: String? = null
     ) {
         val cleanStreamUrl = streamUrl.substringBefore('?')
         val infoUrl = "$cleanStreamUrl/info"
         val infoJson = httpGetText(infoUrl, isGitHubApi = false)
         val obj = infoJson?.let { runCatching { JSONObject(it) }.getOrNull() }
-        val name = obj?.optString("name", "")?.ifBlank { null } ?: "${fileId.ifBlank { "pixeldrain" }}.mp4"
+        val rawName = obj?.optString("name", "")?.ifBlank { null } ?: "${fileId.ifBlank { "pixeldrain" }}.mp4"
+        val finalName = applyCustomFileName(customFileName, rawName)
         val size = obj?.optLong("size", 0L) ?: 0L
         val mime = obj?.optString("mime_type", "") ?: ""
-        val classified = classifyMediaByName(name, mime) ?: (MediaKind.VIDEO to false)
-        val itemKey = sha256(cleanStreamUrl)
+        val classified = classifyMediaByName(finalName, mime) ?: (MediaKind.VIDEO to false)
+        val itemKey = sha256("$cleanStreamUrl|${customFileName.orEmpty()}")
         mediaMap[itemKey] = buildMediaItem(
             id = itemKey,
-            fileName = name,
+            fileName = finalName,
             kind = classified.first,
             sourceType = SourceType.PIXELDRAIN,
             mediaUrl = cleanStreamUrl,
@@ -669,7 +714,8 @@ object AutoDiscoveryRepository {
     private fun discoverAcefilePage(
         pageUrl: String,
         fileId: String,
-        mediaMap: MutableMap<String, RemoteMediaItem>
+        mediaMap: MutableMap<String, RemoteMediaItem>,
+        customFileName: String? = null
     ) {
         val targetUrls = buildList {
             if (fileId.isNotEmpty() && pageUrl.contains("/f/")) {
@@ -688,13 +734,14 @@ object AutoDiscoveryRepository {
                     ?.trim()
                     .orEmpty()
                 val slugName = pageUrl.substringAfterLast('/').substringBefore('?')
-                val finalName = when {
+                val resolvedName = when {
                     slugName.contains('.') -> decodeUrlName(slugName)
                     rawTitle.isNotBlank() -> "$rawTitle.mp4"
                     else -> "acefile_${fileId.ifEmpty { "stream" }}.mp4"
                 }
+                val finalName = applyCustomFileName(customFileName, resolvedName)
                 val classified = classifyMediaByName(finalName) ?: (MediaKind.VIDEO to false)
-                val itemKey = sha256(direct)
+                val itemKey = sha256("$direct|${customFileName.orEmpty()}")
                 mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
                     fileName = finalName,
@@ -714,7 +761,8 @@ object AutoDiscoveryRepository {
 
     private fun discoverSingleDriveFile(
         fileId: String,
-        mediaMap: MutableMap<String, RemoteMediaItem>
+        mediaMap: MutableMap<String, RemoteMediaItem>,
+        customFileName: String? = null
     ) {
         val dlUrl = NativeCore.buildDriveDownloadUrl(fileId)
         val conn = LocalStreamServer.openRemoteConnection(dlUrl, rangeHeader = "bytes=0-1023")
@@ -727,13 +775,18 @@ object AutoDiscoveryRepository {
                 ?.get(1)
                 ?.let { decodeUrlName(it.trim('"')) }
                 .orEmpty()
-            val fileName = dispName.ifBlank { "gdrive_$fileId.mp4" }
+            val resolvedName = dispName.ifBlank { "gdrive_$fileId.mp4" }
+            val fileName = applyCustomFileName(customFileName, resolvedName)
             val classified = classifyMediaByName(fileName, ct) ?: (MediaKind.VIDEO to false)
             val totalSize = conn.getHeaderField("Content-Range")
                 ?.substringAfterLast('/', "")
                 ?.trim()
                 ?.toLongOrNull() ?: 0L
-            val itemKey = "gdrive_$fileId"
+            val itemKey = if (customFileName.isNullOrBlank()) {
+                "gdrive_$fileId"
+            } else {
+                "gdrive_${fileId}_${sha256(customFileName).take(8)}"
+            }
             mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
                 fileName = fileName,
@@ -753,14 +806,16 @@ object AutoDiscoveryRepository {
     private fun discoverDirectOrWebFile(
         rawUrl: String,
         sourceType: SourceType,
-        mediaMap: MutableMap<String, RemoteMediaItem>
+        mediaMap: MutableMap<String, RemoteMediaItem>,
+        customFileName: String? = null
     ) {
         val urlWithoutQuery = rawUrl.substringBefore('?').substringBefore('#')
-        val candidateName = decodeUrlName(urlWithoutQuery.substringAfterLast('/'))
+        val rawName = decodeUrlName(urlWithoutQuery.substringAfterLast('/'))
+        val candidateName = applyCustomFileName(customFileName, rawName)
         val directClassified = classifyMediaByName(candidateName)
 
         if (directClassified != null) {
-            val itemKey = sha256(rawUrl)
+            val itemKey = sha256("$rawUrl|${customFileName.orEmpty()}")
             mediaMap[itemKey] = buildMediaItem(
                 id = itemKey,
                 fileName = candidateName,
@@ -789,10 +844,11 @@ object AutoDiscoveryRepository {
             if (ct.contains("text/html")) {
                 val html = conn.inputStream.bufferedReader().readText()
                 val extracted = extractMediaUrlFromHtml(html, rawUrl) ?: return
-                val extractedName = decodeUrlName(extracted.substringBefore('?').substringAfterLast('/'))
+                val resolvedExtractedName = decodeUrlName(extracted.substringBefore('?').substringAfterLast('/'))
                     .ifBlank { dispName.ifBlank { "stream_media.mp4" } }
+                val extractedName = applyCustomFileName(customFileName, resolvedExtractedName)
                 val classified = classifyMediaByName(extractedName) ?: (MediaKind.VIDEO to false)
-                val itemKey = sha256(extracted)
+                val itemKey = sha256("$extracted|${customFileName.orEmpty()}")
                 mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
                     fileName = extractedName,
@@ -806,13 +862,14 @@ object AutoDiscoveryRepository {
                     headers = mapOf("Referer" to rawUrl)
                 )
             } else {
-                val finalName = dispName.ifBlank {
+                val resolvedName = dispName.ifBlank {
                     candidateName.ifBlank {
                         if (ct.startsWith("image/")) "image_stream.jpg" else "video_stream.mp4"
                     }
                 }
+                val finalName = applyCustomFileName(customFileName, resolvedName)
                 val classified = classifyMediaByName(finalName, ct) ?: (MediaKind.VIDEO to false)
-                val itemKey = sha256(rawUrl)
+                val itemKey = sha256("$rawUrl|${customFileName.orEmpty()}")
                 mediaMap[itemKey] = buildMediaItem(
                     id = itemKey,
                     fileName = finalName,
