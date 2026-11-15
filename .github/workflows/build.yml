@@ -19,7 +19,7 @@ jobs:
 
       - name: Generate Mipmap & Adaptive Icons from icon.png
         run: |
-          python3 -m pip install --quiet --user Pillow
+          python3 -c "import PIL" 2>/dev/null || python3 -m pip install --quiet --break-system-packages Pillow
           python3 - << 'EOF'
           import os
           from PIL import Image, ImageDraw
@@ -159,7 +159,9 @@ jobs:
           targets: ${{ matrix.rust_target }}
 
       - name: Install Prebuilt cargo-ndk
-        uses: taiki-e/install-action@cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
 
       - name: Cache Cargo Dependencies & Target
         uses: actions/cache@v4
@@ -244,7 +246,7 @@ jobs:
             GRADLE_CMD="gradle"
           fi
 
-          if $GRADLE_CMD tasks --all --quiet 2>/dev/null | grep -q "cargoBuild"; then
+          if grep -rq "cargoBuild" app/build.gradle* build.gradle* 2>/dev/null; then
             $GRADLE_CMD assembleRelease -x cargoBuild --no-daemon
           else
             $GRADLE_CMD assembleRelease --no-daemon
