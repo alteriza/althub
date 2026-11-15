@@ -1,4 +1,4 @@
-use jni::objects::{JByteArray, JObject, JString};
+use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use serde::{Deserialize, Serialize};
