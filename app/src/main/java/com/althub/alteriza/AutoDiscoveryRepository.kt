@@ -853,8 +853,9 @@ object AutoDiscoveryRepository {
     }
 
     private fun parseGitHubUrl(rawUrl: String): GitHubLocation? {
-    	val clean = rawUrl.trim().removeSuffix("/")
-    	if (clean.contains("/releases/download/")) return null
+        val clean = rawUrl.trim().removeSuffix("/")
+        if (clean.contains("/releases/")) return null
+        val regex = Regex("""^https?://(?:www\.)?github\.com/([^/]+)/([^/]+)(?:/(?:tree|blob)/([^/]+)(?:/(.*))?)?$""")
         val m = regex.find(clean)
         if (m != null) {
             val owner = m.groupValues[1]
