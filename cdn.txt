@@ -43,3 +43,16 @@ https://github.com/alteriza/anime-repo/releases/download/YaseiLB/EPS9.720p.Yasei
 https://github.com/alteriza/anime-repo/releases/download/YaseiLB/EPS10.720p.YaseiLB.vcv#[EPS10][720p]Yasei no Last Boss ga Arawareta!
 https://github.com/alteriza/anime-repo/releases/download/YaseiLB/EPS11.720p.YaseiLB.vcv#[EPS11][720p]Yasei no Last Boss ga Arawareta!
 https://github.com/alteriza/anime-repo/releases/download/YaseiLB/EPS12.720p.YaseiLB.vcv#[EPS12][720p]Yasei no Last Boss ga Arawareta!
+
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS1.720P.TENKIZ.KANSKILL.vcv#[EPS1][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS2.720P.TENKIZ.KANSKILL.vcv#[EPS2][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS3.720P.TENKIZ.KANSKILL.vcv#[EPS3][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS4.720P.TENKIZ.KANSKILL.vcv#[EPS4][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS5.720P.TENKIZ.KANSKILL.vcv#[EPS5][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS6.720P.TENKIZ.KANSKILL.vcv#[EPS6][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS7.720P.TENKIZ.KANSKILL.vcv#[EPS7][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS8.720P.TENKIZ.KANSKILL.vcv#[EPS8][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS9.720P.TENKIZ.KANSKILL.vcv#[EPS9][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS10.720P.TENKIZ.KANSKILL.vcv#[EPS10][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS11.720P.TENKIZ.KANSKILL.vcv#[EPS11][720p]Tensei Kizoku, Kantei Skill
+https://github.com/alteriza/anime-repo/releases/download/TKKS/EPS12.720P.TENKIZ.KANSKILL.vcv#[EPS12][720p]Tensei Kizoku, Kantei Skill
