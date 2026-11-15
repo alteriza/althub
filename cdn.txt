@@ -30,3 +30,5 @@ https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS4.720p.RomSen
 https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS5.720p.RomSen.vcv#[EPS5][720p]Romelia Senki
 https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS6.720p.RomSen.vcv#[EPS6][720p]Romelia Senki
 https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS7.720p.RomSen.vcv#[EPS7][720p]Romelia Senki
+
+https://github.com/alteriza/anime-repo/releases/download/YaseiLB/EPS1.720p.YaseiLB.vcv
