@@ -16,19 +16,19 @@ https://github.com/alteriza/anime-repo/releases/download/ME/EPS6.720p.Magical.Ex
 https://github.com/alteriza/anime-repo/releases/download/ME/EPS7.720p.Magical.Explorer.vcv#[EPS7][720p]Magical Explorer
 https://github.com/alteriza/anime-repo/releases/download/ME/EPS8.720p.Magical.Explorer.vcv#[EPS8][720p]Magical Explorer
 
-https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS6.720p.HyoukenS2.vcv#[S2][EPS6][720p]Hyouken no Majutsushi
-https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS5.720p.HyoukenS2.vcv#[S2][EPS5][720p]Hyouken no Majutsushi
-https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS4.720p.HyoukenS2.vcv#[S2][EPS4][720p]Hyouken no Majutsushi
-https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS3.720p.HyoukenS2.vcv#[S2][EPS3][720p]Hyouken no Majutsushi
-https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS2.720p.HyoukenS2.vcv#[S2][EPS2][720p]Hyouken no Majutsushi
-https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS1.720p.HyoukenS2.vcv#[S2][EPS1][720p]Hyouken no Majutsushi
+https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS6.720p.Hyouken.S2.vcv#[S2][EPS6][720p]Hyouken no Majutsushi
+https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS5.720p.Hyouken.S2.vcv#[S2][EPS5][720p]Hyouken no Majutsushi
+https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS4.720p.Hyouken.S2.vcv#[S2][EPS4][720p]Hyouken no Majutsushi
+https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS3.720p.Hyouken.S2.vcv#[S2][EPS3][720p]Hyouken no Majutsushi
+https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS2.720p.Hyouken.S2.vcv#[S2][EPS2][720p]Hyouken no Majutsushi
+https://github.com/alteriza/anime-repo/releases/download/Hyouken/EPS1.720p.Hyouken.S2.vcv#[S2][EPS1][720p]Hyouken no Majutsushi
 
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS1.720p.RomSen.vcv#[EPS1][720p]Romelia Senki
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS2.720p.RomSen.vcv#[EPS2][720p]Romelia Senki
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS3.720p.RomSen.vcv#[EPS3][720p]Romelia Senki
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS4.720p.RomSen.vcv#[EPS4][720p]Romelia Senki
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS5.720p.RomSen.vcv#[EPS5][720p]Romelia Senki
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS6.720p.RomSen.vcv#[EPS6][720p]Romelia Senki
-https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS7.720p.RomSen.vcv#[EPS7][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS1.720p.Rom.Sen.vcv#[EPS1][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS2.720p.Rom.Sen.vcv#[EPS2][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS3.720p.Rom.Sen.vcv#[EPS3][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS4.720p.Rom.Sen.vcv#[EPS4][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS5.720p.Rom.Sen.vcv#[EPS5][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS6.720p.Rom.Sen.vcv#[EPS6][720p]Romelia Senki
+https://github.com/alteriza/anime-repo/releases/download/RomSen/EPS7.720p.Rom.Sen.vcv#[EPS7][720p]Romelia Senki
 
 https://github.com/alteriza/anime-repo/releases/download/YaseiLB/EPS1.720p.YaseiLB.vcv
